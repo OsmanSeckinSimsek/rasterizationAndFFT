@@ -31,7 +31,7 @@ void write_spectra_file(std::string spectra_filename, int numShells, double *E)
     spectra.open(spectra_filename, std::ios::trunc);
     for (uint64_t i = 0; i < numShells; i++)
     {
-        spectra << std::setprecision(8) << std::scientific << E[i] << std::endl;
+        spectra << std::setprecision(16) << E[i] << std::endl;
     }
     spectra.close();
 }
@@ -44,9 +44,9 @@ void write_gridded3D_file(std::string v_filename, int gridDim3, double *gridX, d
     vfile.open(v_filename, std::ios::trunc);
     for (uint64_t i = 0; i < gridDim3; i++)
     {
-        vfile << std::setprecision(8) << std::scientific << gridX[i] << " "
-                                      << std::scientific << gridY[i] << " "
-                                      << std::scientific << gridZ[i] << " "
+        vfile << std::setprecision(16) << gridX[i] << " "
+                                      << gridY[i] << " "
+                                      << gridZ[i] << " "
                                       << std::endl;
     }
     vfile.close();
@@ -60,7 +60,7 @@ void write_gridded_file(std::string v_filename, int gridDim3, double *gridData)
     vfile.open(v_filename, std::ios::trunc);
     for (uint64_t i = 0; i < gridDim3; i++)
     {
-        vfile << std::setprecision(8) << std::scientific << gridData[i] << std::endl;
+        vfile << std::setprecision(16) << gridData[i] << std::endl;
     }
     vfile.close();
 }

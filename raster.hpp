@@ -20,6 +20,7 @@ void assign_velocities(double* xpos, double* ypos, double* zpos, double* vx, dou
     {
         for (int j = 0; j < gridDim; j++)
         {
+            #pragma omp parallel for
             for (int k = 0; k < gridDim; k++)
             {
                 double min_distance = std::numeric_limits<double>::infinity();
@@ -39,6 +40,13 @@ void assign_velocities(double* xpos, double* ypos, double* zpos, double* vx, dou
                         min_index = p;
                     }
                 }
+        // std::cout << "gridIndex " << gridIndex << " minIndex " << min_index << std::endl;
+        // std::cout << "vx " << vx[min_index] << std::endl;
+        // std::cout << "vy " << vy[min_index] << std::endl;
+        // std::cout << "vz " << vz[min_index] << std::endl;
+        // std::cout << "gridx " << gridX[gridIndex] << std::endl;
+        // std::cout << "gridy " << gridY[gridIndex] << std::endl;
+        // std::cout << "gridz " << gridY[gridIndex] << std::endl;
 
                 gridX[gridIndex] = vx[min_index];
                 gridY[gridIndex] = vy[min_index];
@@ -49,7 +57,48 @@ void assign_velocities(double* xpos, double* ypos, double* zpos, double* vx, dou
 
 }
 
-void calculate_spectrum()
+void calculate_spectrum(double *gridX, double *gridY, double *gridZ, int gridDim)
 {
+    int gridDim3 = gridDim * gridDim * gridDim;
+    heffte::box3d<> inbox = {{0, 0, 0}, {gridDim - 1, gridDim - 1, gridDim - 1}};
+    heffte::box3d<> outbox = {{0, 0, 0}, {gridDim - 1, gridDim - 1, gridDim - 1}};
+    std::cout << "inbox and outbox box3d done." << std::endl;
 
+    heffte::fft3d<heffte::backend::fftw> fft(inbox, outbox, MPI_COMM_WORLD);
+    std::cout << "fft created." << std::endl;
+
+    std::vector<double> input(fft.size_inbox());
+    std::vector<std::complex<double>> output(fft.size_outbox());
+    std::cout << "input and output created." << std::endl;
+
+    for (size_t i = 0; i < gridDim3; i++)
+    {
+        input.at(i) = gridX[i];
+    }
+
+    fft.forward(input.data(), output.data());
+    std::cout << "fft for X dim done." << std::endl;
+
+    for (size_t i = 0; i < gridDim3; i++)
+    {
+        gridX[i] = abs(output.at(i));
+        input.at(i) = gridY[i];
+    }
+
+    fft.forward(input.data(), output.data());
+    std::cout << "fft for Y dim done." << std::endl;
+
+    for (size_t i = 0; i < gridDim3; i++)
+    {
+        gridY[i] = abs(output.at(i));
+        input.at(i) = gridZ[i];
+    }
+
+    fft.forward(input.data(), output.data());
+    std::cout << "fft for Z dim done." << std::endl;
+
+    for (size_t i = 0; i < gridDim3; i++)
+    {
+        gridZ[i] = abs(output.at(i));
+    }
 }

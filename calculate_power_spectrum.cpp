@@ -16,17 +16,17 @@ int main(int argc, char **argv)
     std::string spectra_filename = argv[2];
     int simDim = atoi(argv[3]);
 
-    int numParticles = std::pow(simDim, 3);
+    int numParticles = simDim * simDim * simDim;
     int gridDim = simDim * 2;
-    int gridDim3 = std::pow(gridDim3, 3);
+    int gridDim3 = gridDim * gridDim * gridDim;
     int numShells = gridDim;
 
-    std::vector<double> xpos(numParticles);
-    std::vector<double> ypos(numParticles);
-    std::vector<double> zpos(numParticles);
-    std::vector<double> vx(numParticles);
-    std::vector<double> vy(numParticles);
-    std::vector<double> vz(numParticles);
+    std::vector<double> xpos(gridDim3);
+    std::vector<double> ypos(gridDim3);
+    std::vector<double> zpos(gridDim3);
+    // std::vector<double> vx(numParticles);
+    // std::vector<double> vy(numParticles);
+    // std::vector<double> vz(numParticles);
     std::vector<double> gridX(gridDim3);
     std::vector<double> gridY(gridDim3);
     std::vector<double> gridZ(gridDim3);
@@ -35,29 +35,29 @@ int main(int argc, char **argv)
     auto start = chrono::steady_clock::now();
 
     read_sphexa_file(sphexa_filename, numParticles, xpos.data(), ypos.data(),
-                     zpos.data(), vx.data(), vy.data(), vz.data());
+                     zpos.data(), gridX.data(), gridY.data(), gridZ.data());
 
     auto end = chrono::steady_clock::now();
     std::cout << "Reading file took: "
               << chrono::duration_cast<chrono::milliseconds>(end - start).count()
               << " ms" << std::endl;
 
-    assign_velocities(xpos.data(), ypos.data(), zpos.data(), vx.data(), vy.data(), vz.data(),
-                        gridX.data(), gridY.data(), gridZ.data(), simDim, gridDim);
+    // assign_velocities(xpos.data(), ypos.data(), zpos.data(), vx.data(), vy.data(), vz.data(),
+    //                     gridX.data(), gridY.data(), gridZ.data(), simDim, gridDim);
 
-    end = chrono::steady_clock::now();
-    std::cout << "Gridding took: "
-              << chrono::duration_cast<chrono::milliseconds>(end - start).count()
-              << " ms" << std::endl;
+    // end = chrono::steady_clock::now();
+    // std::cout << "Gridding took: "
+    //           << chrono::duration_cast<chrono::milliseconds>(end - start).count()
+    //           << " ms" << std::endl;
 
-    write_gridded3D_file(gridded_filename, gridDim3, gridX.data(), gridY.data(), gridZ.data());
+    // write_gridded3D_file(gridded_filename, gridDim3, gridX.data(), gridY.data(), gridZ.data());
 
-    end = chrono::steady_clock::now();
-    std::cout << "Grid file written: "
-              << chrono::duration_cast<chrono::milliseconds>(end - start).count()
-              << " ms" << std::endl;
+    // end = chrono::steady_clock::now();
+    // std::cout << "Grid file written: "
+    //           << chrono::duration_cast<chrono::milliseconds>(end - start).count()
+    //           << " ms" << std::endl;
 
-    calculate_spectrum();
+    calculate_spectrum(gridX.data(), gridY.data(), gridZ.data(), gridDim);
 
     end = chrono::steady_clock::now();
     std::cout << "Spectrum calculated: "
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
               << " ms" << std::endl;
 
     // missing E and k related inputs
-    write_spectra_file(spectra_filename, numShells, E.data());
+    // write_spectra_file(spectra_filename, numShells, E.data());
 
     end = chrono::steady_clock::now();
     std::cout << "Spectrum file written: "
