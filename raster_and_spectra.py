@@ -23,7 +23,7 @@ elapsed = end_time1 - start_time
 print(f"Reading done. Time: {elapsed} s")
 
 # Create a 3D Cartesian mesh
-mesh_resolution = len(x.shape[0]) * 2
+mesh_resolution = 400
 mesh_x, mesh_y, mesh_z = np.meshgrid(np.linspace(-0.5, 0.5, mesh_resolution),
                                      np.linspace(-0.5, 0.5, mesh_resolution),
                                      np.linspace(-0.5, 0.5, mesh_resolution))
@@ -62,11 +62,11 @@ print(f"Interpolating. Time: {elapsed} s")
 grid_size = mesh_resolution
 
 # Compute the velocity field
-vx_field = interpolated_values[:, :, :, 0].reshape(
+vx_field = interpolated_values[:, 0].reshape(
     (grid_size, grid_size, grid_size))
-vy_field = interpolated_values[:, :, :, 1].reshape(
+vy_field = interpolated_values[:, 1].reshape(
     (grid_size, grid_size, grid_size))
-vz_field = interpolated_values[:, :, :, 1].reshape(
+vz_field = interpolated_values[:, 2].reshape(
     (grid_size, grid_size, grid_size))
 print("Calculating means")
 
