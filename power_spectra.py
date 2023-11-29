@@ -28,27 +28,27 @@ print(mean_vy)
 print(mean_vz)
 
 # Calculate the magnitude of the velocity field
-velocity_magnitude = np.linalg.norm([vx_field, vy_field, vz_field], axis=0)
-mean_v = np.mean(velocity_magnitude)
-print(mean_v)
+#velocity_magnitude = np.linalg.norm([vx_field, vy_field, vz_field], axis=0)
+#mean_v = np.mean(velocity_magnitude)
+#print(mean_v)
 # Subtract the mean from each component
-velocity_magnitude -= mean_v
+#velocity_magnitude -= mean_v
 # Perform 3D Fourier transform
 print("Calculating FFTs")
 
-#vx_fft = np.fft.fftn(vx_field)
-#vy_fft = np.fft.fftn(vy_field)
-#vz_fft = np.fft.fftn(vz_field)
+vx_fft = np.fft.fftn(vx_field)
+vy_fft = np.fft.fftn(vy_field)
+vz_fft = np.fft.fftn(vz_field)
 
 # Perform 3D Fourier transform of the magnitude of the velocity field
-velocity_magnitude_fft = np.fft.fftn(velocity_magnitude)
+#velocity_magnitude_fft = np.fft.fftn(velocity_magnitude)
 print("Calculating Power Spectra")
 
 # Compute the magnitude of the Fourier transform
-#power_spectrum = (np.abs(vx_fft) ** 2 + np.abs(vy_fft) ** 2 + np.abs(vz_fft) ** 2)
+power_spectrum = (np.abs(vx_fft) ** 2 + np.abs(vy_fft) ** 2 + np.abs(vz_fft) ** 2)
 
 # Compute the magnitude of the Fourier transform
-power_spectrum = np.abs(velocity_magnitude_fft) ** 2
+#power_spectrum = np.abs(velocity_magnitude_fft) ** 2
 
 # Compute the 1D wavenumber array
 k_values = np.fft.fftfreq(grid_size, d=1.0 / grid_size)
@@ -68,7 +68,7 @@ for i in range(grid_size):
 
 # Normalize the result
 power_spectrum_radial /= np.sum(power_spectrum_radial)
-#power_spectrum_radial *= k_1d
+
 print("Outputing...")
 
 # Save 1D spectra and k to a file
