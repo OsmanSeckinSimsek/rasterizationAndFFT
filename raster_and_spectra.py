@@ -3,151 +3,196 @@ import h5py
 import time
 from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
+import sys
 
-# Record the start time
-start_time = time.time()
 
-file_name = 'turb_200_correct.h5'
+def readStep(fname, step):
+    ifile = h5py.File(fname, "r")
+    try:
+        h5step = ifile["Step#%s" % step]
+        return h5step
+    except KeyError:
+        print(fname, "step %s not found" % step)
+        sys.exit(1)
 
-print("Reading")
-with h5py.File(file_name, 'r') as file:
-    x = file['Step#22/x'][:]
-    y = file['Step#22/y'][:]
-    z = file['Step#22/z'][:]
-    vx = file['Step#22/vx'][:]
-    vy = file['Step#22/vy'][:]
-    vz = file['Step#22/vz'][:]
 
-end_time1 = time.time()
-elapsed = end_time1 - start_time
-print(f"Reading done. Time: {elapsed} s")
+def rasterAndSpectra(fname, step, gridSize):
+    # Record the start time
+    start_time = time.time()
 
-# Create a 3D Cartesian mesh
-mesh_resolution = 400
-mesh_x, mesh_y, mesh_z = np.meshgrid(np.linspace(-0.5, 0.5, mesh_resolution),
-                                     np.linspace(-0.5, 0.5, mesh_resolution),
-                                     np.linspace(-0.5, 0.5, mesh_resolution))
+    file_name = fname
 
-# Convert mesh coordinates to a flat array
-target_grid_points = np.column_stack(
-    (mesh_x.ravel(), mesh_y.ravel(), mesh_z.ravel()))
-end_time2 = time.time()
-elapsed = end_time2 - end_time1
-print(f"Creating Cartesian mesh. Time: {elapsed} s")
+    print("Reading")
+    h5step = readStep(file_name, step)
 
-# Create KD-Tree from scattered points
-scattered_points = np.column_stack((x, y, z))
-kdtree = cKDTree(scattered_points)
-end_time3 = time.time()
-elapsed = end_time3 - end_time2
-print(f"Creating KD-tree. Time: {elapsed} s")
+    x = np.array(h5step["x"])
+    y = np.array(h5step["y"])
+    z = np.array(h5step["z"])
+    h = np.array(h5step["h"])
+    vx = np.array(h5step["vx"])
+    vy = np.array(h5step["vy"])
+    vz = np.array(h5step["vz"])
 
-# Query the KD-Tree for nearest neighbors
-distances, indices = kdtree.query(target_grid_points, k=1)
-end_time4 = time.time()
-elapsed = end_time4 - end_time3
-print(f"Querying KD-tree. Time: {elapsed} s")
+    end_time1 = time.time()
+    elapsed = end_time1 - start_time
+    print(f"Reading done. Time: {elapsed} s")
 
-# Interpolate values based on the nearest neighbors
-interpolated_values = np.column_stack((vx[indices], vy[indices], vz[indices]))
+    # Create a 3D Cartesian mesh
+    mesh_resolution = int(gridSize)
+    mesh_x, mesh_y, mesh_z = np.meshgrid(np.linspace(-0.5, 0.5, mesh_resolution),
+                                         np.linspace(-0.5, 0.5,
+                                                     mesh_resolution),
+                                         np.linspace(-0.5, 0.5, mesh_resolution))
 
-# Reshape the interpolated values to match the shape of the target grid
-interpolated_values_reshaped = interpolated_values.reshape(
-    (mesh_resolution, mesh_resolution, mesh_resolution, 3))
-end_time5 = time.time()
-elapsed = end_time5 - end_time4
-print(f"Interpolating. Time: {elapsed} s")
+    # Convert mesh coordinates to a flat array
+    target_grid_points = np.column_stack(
+        (mesh_x.ravel(), mesh_y.ravel(), mesh_z.ravel()))
+    end_time2 = time.time()
+    elapsed = end_time2 - end_time1
+    print(f"Creating Cartesian mesh. Time: {elapsed} s")
 
-# Number of grid points in each dimension
-grid_size = mesh_resolution
+    # Create KD-Tree from scattered points
+    scattered_points = np.column_stack((x, y, z))
+    kdtree = cKDTree(scattered_points)
+    end_time3 = time.time()
+    elapsed = end_time3 - end_time2
+    print(f"Creating KD-tree. Time: {elapsed} s")
 
-# Compute the velocity field
-vx_field = interpolated_values[:, 0].reshape(
-    (grid_size, grid_size, grid_size))
-vy_field = interpolated_values[:, 1].reshape(
-    (grid_size, grid_size, grid_size))
-vz_field = interpolated_values[:, 2].reshape(
-    (grid_size, grid_size, grid_size))
-print("Calculating means")
+    # Query the KD-Tree for nearest neighbors
+    distances, indices = kdtree.query(target_grid_points, k=1)
+    end_time4 = time.time()
+    elapsed = end_time4 - end_time3
+    print(f"Querying KD-tree. Time: {elapsed} s")
 
-# Calculate the mean along each spatial dimension
-mean_vx = np.mean(vx_field, axis=(0, 1, 2))
-mean_vy = np.mean(vy_field, axis=(0, 1, 2))
-mean_vz = np.mean(vz_field, axis=(0, 1, 2))
-print(mean_vx)
-print(mean_vy)
-print(mean_vz)
+    # Interpolate values based on the nearest neighbors
+    interpolated_values = np.column_stack(
+        (vx[indices], vy[indices], vz[indices]))
 
-print("Calculating FFTs")
-vx_fft = np.fft.fftn(vx_field)
-vy_fft = np.fft.fftn(vy_field)
-vz_fft = np.fft.fftn(vz_field)
+    # Reshape the interpolated values to match the shape of the target grid
+    interpolated_values_reshaped = interpolated_values.reshape(
+        (mesh_resolution, mesh_resolution, mesh_resolution, 3))
+    end_time5 = time.time()
+    elapsed = end_time5 - end_time4
+    print(f"Interpolating. Time: {elapsed} s")
 
-print("Calculating Power Spectra")
-power_spectrum = (np.abs(vx_fft) ** 2 + np.abs(vy_fft)
-                  ** 2 + np.abs(vz_fft) ** 2)
-end_time6 = time.time()
-elapsed = end_time6 - end_time5
-print(f"Calculating Power Spectra. Time: {elapsed} s")
+    # Number of grid points in each dimension
+    grid_size = mesh_resolution
 
-# Compute the 1D wavenumber array
-k_values = np.fft.fftfreq(grid_size, d=1.0 / grid_size)
+    # Compute the velocity field
+    vx_field = interpolated_values[:, 0].reshape(
+        (grid_size, grid_size, grid_size))
+    vy_field = interpolated_values[:, 1].reshape(
+        (grid_size, grid_size, grid_size))
+    vz_field = interpolated_values[:, 2].reshape(
+        (grid_size, grid_size, grid_size))
+    print("Calculating means")
 
-k_1d = np.abs(k_values)
+    # Calculate the mean along each spatial dimension
+    mean_vx = np.mean(vx_field, axis=(0, 1, 2))
+    mean_vy = np.mean(vy_field, axis=(0, 1, 2))
+    mean_vz = np.mean(vz_field, axis=(0, 1, 2))
+    print(mean_vx)
+    print(mean_vy)
+    print(mean_vz)
 
-# Perform spherical averaging to get 1D power spectrum
-power_spectrum_radial = np.zeros_like(k_1d)
+    print("Calculating FFTs")
+    vx_fft = np.fft.fftn(vx_field)
+    vy_fft = np.fft.fftn(vy_field)
+    vz_fft = np.fft.fftn(vz_field)
 
-for i in range(grid_size):
-    for j in range(grid_size):
-        for l in range(grid_size):
-            k = np.sqrt(k_values[i] ** 2 + k_values[j] ** 2 + k_values[l] ** 2)
-            k_index = np.argmin(np.abs(k_1d - k))
-            power_spectrum_radial[k_index] += power_spectrum[i, j, l]
+    # create array with absolute values of the FFTs
+    vx_fft = np.abs(vx_fft)
+    vy_fft = np.abs(vy_fft)
+    vz_fft = np.abs(vz_fft)
 
-# Normalize the result
-power_spectrum_radial /= np.sum(power_spectrum_radial)
-# power_spectrum_radial *= k_1d
+    # write values of the FFTs to a file
+    output_file_path = 'fft_data_200.txt'
+    with open(output_file_path, 'w') as output_file:
+        for i in range(grid_size):
+            for j in range(grid_size):
+                for k in range(grid_size):
+                    output_file.write(
+                        f"{vx_fft[i, j, k]}, {vy_fft[i, j, k]}, {vz_fft[i, j, k]}\n")
 
-end_time7 = time.time()
-elapsed = end_time7 - end_time6
-print(f"Spherical averaging. Time: {elapsed} s")
+    print("Calculating Power Spectra")
+    power_spectrum = (np.abs(vx_fft) ** 2 + np.abs(vy_fft)
+                      ** 2 + np.abs(vz_fft) ** 2)
+    end_time6 = time.time()
+    elapsed = end_time6 - end_time5
+    print(f"Calculating Power Spectra. Time: {elapsed} s")
 
-print("Outputing...")
+    # Compute the 1D wavenumber array
+    k_values = np.fft.fftfreq(grid_size, d=1.0 / grid_size)
 
-# Save 1D spectra and k to a file
-output_file_path = 'power_spectrum_data_analytical.txt'
-np.savetxt(output_file_path, np.column_stack(
-    (k_1d[k_values > 0], power_spectrum_radial[k_values > 0])))
+    k_1d = np.abs(k_values)
 
-end_time8 = time.time()
-elapsed = end_time8 - end_time7
-print(f"Outputing. Time: {elapsed} s")
+    # Perform spherical averaging to get 1D power spectrum
+    power_spectrum_radial = np.zeros_like(k_1d)
 
-print("Plotting")
+    for i in range(grid_size):
+        for j in range(grid_size):
+            for l in range(grid_size):
+                k = np.sqrt(k_values[i] ** 2 + k_values[j]
+                            ** 2 + k_values[l] ** 2)
+                k_index = np.argmin(np.abs(k_1d - k))
+                power_spectrum_radial[k_index] += power_spectrum[i, j, l]
 
-# Plot the 1D power spectrum
-plt.plot(k_1d[1:], power_spectrum_radial[1:])
-plt.xscale('log')
-plt.yscale('log')
-# Set x-axis limit to start from 6
-plt.xlim(6, k_1d.max())
+    # Normalize the result
+    power_spectrum_radial /= np.sum(power_spectrum_radial)
+    # power_spectrum_radial *= k_1d
 
-# Add a line for the expected Kolmogorov slope of -5/3
-kolmogorov_line = k_1d[1:]**(-5.0/3.0)
-plt.plot(k_1d[1:], kolmogorov_line,
-         label='Kolmogorov slope (-5/3)', linestyle='--')
+    end_time7 = time.time()
+    elapsed = end_time7 - end_time6
+    print(f"Spherical averaging. Time: {elapsed} s")
 
-plt.xlabel('Wavenumber (k)')
-plt.ylabel('E_k')
-plt.title('Power Spectrum 200^3')
+    print("Outputing...")
 
-# Add legend
-plt.legend()
+    # Save 1D spectra and k to a file
+    output_file_path = "power_spectrum_data_analytical_%s.txt" % gridSize
+    np.savetxt(output_file_path, np.column_stack(
+        (k_1d[k_values > 0], power_spectrum_radial[k_values > 0])))
 
-# Save the plot as a PNG file
-plt.savefig('power_spectrum.png')
+    end_time8 = time.time()
+    elapsed = end_time8 - end_time7
+    print(f"Outputing. Time: {elapsed} s")
 
-print("Done!")
-elapsed = end_time8 - start_time
-print(f"Total elapsed time: {elapsed} s")
+    print("Plotting")
+
+    # Plot the 1D power spectrum
+    plt.plot(k_1d[1:], power_spectrum_radial[1:])
+    plt.xscale('log')
+    plt.yscale('log')
+    # Set x-axis limit to start from 6
+    plt.xlim(6, k_1d.max())
+
+    # Add a line for the expected Kolmogorov slope of -5/3
+    kolmogorov_line = k_1d[1:]**(-5.0/3.0)
+    plt.plot(k_1d[1:], kolmogorov_line,
+             label='Kolmogorov slope (-5/3)', linestyle='--')
+
+    plt.xlabel('Wavenumber (k)')
+    plt.ylabel('E_k')
+    plt.title("Power Spectrum %s^3" % gridSize)
+
+    # Add legend
+    plt.legend()
+
+    # Save the plot as a PNG file
+    plt.savefig("power_spectrum_%s.png" % gridSize)
+
+    print("Done!")
+    elapsed = end_time8 - start_time
+    print(f"Total elapsed time: {elapsed} s")
+
+
+if __name__ == "__main__":
+    # first cmdline argument: hdf5 file name to plot
+    fname = sys.argv[1]
+
+    # second cmdline argument: hdf5 step number to plot or print (-p) and exit
+    step = sys.argv[2]
+
+    # third cmdline argument: size of grid to interpolate to
+    gridSize = sys.argv[3]
+
+    rasterAndSpectra(fname, step, gridSize)
