@@ -22,6 +22,37 @@ void read_sphexa_file(std::string in_filename, uint64_t numParticles, double *xp
     }
 }
 
+void write_fft_file(std::string spectra_filename, double *fftx, double *ffty, double *fftz, int gridSize)
+{
+    uint64_t gridSize3D = gridSize * gridSize * gridSize;
+    std::cout << "Writing in fft file..." << std::endl;
+
+    std::ofstream spectra;
+    spectra.open(spectra_filename, std::ios::trunc);
+    for (uint64_t i = 0; i < gridSize3D; i++)
+    {
+        spectra << std::setprecision(16) << fftx[i] << " "
+                                         << ffty[i] << " "
+                                         << fftz[i] << " "
+                                         << std::endl;
+    }
+    spectra.close();
+}
+
+void write_ps_file(std::string spectra_filename, double *ps, int gridSize)
+{
+    uint64_t gridSize3D = gridSize * gridSize * gridSize;
+    std::cout << "Writing in fft file..." << std::endl;
+
+    std::ofstream spectra;
+    spectra.open(spectra_filename, std::ios::trunc);
+    for (uint64_t i = 0; i < gridSize3D; i++)
+    {
+        spectra << std::setprecision(16) << ps[i] << std::endl;
+    }
+    spectra.close();
+}
+
 void write_spectra_file(std::string spectra_filename, int numShells, double *E)
 {
 
@@ -31,7 +62,7 @@ void write_spectra_file(std::string spectra_filename, int numShells, double *E)
     spectra.open(spectra_filename, std::ios::trunc);
     for (uint64_t i = 0; i < numShells; i++)
     {
-        spectra << std::setprecision(16) << E[i] << std::endl;
+        spectra << std::setprecision(16) << std::scientific << E[i] << std::endl;
     }
     spectra.close();
 }

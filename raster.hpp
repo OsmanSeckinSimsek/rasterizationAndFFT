@@ -1,5 +1,6 @@
 #include <vector>
 #include <limits>
+#include <algorithm>
 #include "heffte.h"
 
 void assign_velocities(double* xpos, double* ypos, double* zpos, double* vx, double* vy,
@@ -81,7 +82,7 @@ void calculate_spectrum(double *gridX, double *gridY, double *gridZ, int gridDim
 
     for (size_t i = 0; i < gridDim3; i++)
     {
-        gridX[i] = abs(output.at(i));
+        gridX[i] = abs(output.at(i)) * abs(output.at(i));
         input.at(i) = gridY[i];
     }
 
@@ -90,7 +91,7 @@ void calculate_spectrum(double *gridX, double *gridY, double *gridZ, int gridDim
 
     for (size_t i = 0; i < gridDim3; i++)
     {
-        gridY[i] = abs(output.at(i));
+        gridY[i] = abs(output.at(i)) * abs(output.at(i));
         input.at(i) = gridZ[i];
     }
 
@@ -99,6 +100,68 @@ void calculate_spectrum(double *gridX, double *gridY, double *gridZ, int gridDim
 
     for (size_t i = 0; i < gridDim3; i++)
     {
-        gridZ[i] = abs(output.at(i));
+        gridZ[i] = abs(output.at(i)) * abs(output.at(i));
     }
+}
+
+void perform_spherical_averaging(double* ps, double* ps_rad, int gridDim)
+{
+    std::vector<double> k_values(gridDim);
+    std::vector<double> k_1d(gridDim);
+    std::vector<double> ps_radial(gridDim);
+
+    for (int i = 0; i < k_values.size()/2; i++)
+    {
+        k_values[i] = i;
+    }
+    int val = 0;
+    for (int i = k_values.size(); i >= k_values.size()/2; i--)
+    {
+        k_values[i] = -val;
+        val++;
+    }
+    std::cout << "k_1d before" << std::endl;
+    for (int i = 0; i < gridDim; i++)
+    {
+        k_1d[i] = std::abs(k_values[i]);
+        std::cout << k_1d[i] << ", ";
+    }
+
+    for (int i = 0; i < gridDim; i++)
+    {
+        for (int j = 0; j < gridDim; j++)
+        {
+            for (int k = 0; k < gridDim; k++)
+            {
+                double kdist = std::sqrt(k_values[i] * k_values[i] + 
+                                     k_values[j] * k_values[j] +
+                                     k_values[k] * k_values[k]);
+                std::vector<double> k_dif(gridDim);
+                for (int kind = 0; kind < gridDim; kind++)
+                {
+                    k_dif[kind] = std::abs(k_1d[kind] - kdist);
+                }
+                auto it = std::min_element(std::begin(k_dif), std::end(k_dif));
+                int k_index = std::distance(std::begin(k_dif), it);
+
+                int ps_index = (i*gridDim + j) * gridDim + k;
+                ps_radial[k_index] += ps[ps_index];
+            }
+        }
+    }
+
+    
+    double sum_ps_radial = std::accumulate(ps_radial.begin(), ps_radial.end(), 0.0);
+    std::cout << "k_1d" << std::endl;
+    for (int i = 0; i < gridDim; i++)
+    {
+        std::cout << k_1d[i] << ", ";
+    }
+    std::cout << "ps" << std::endl;
+    for (int i = 0; i < gridDim; i++)
+    {
+        std::cout << ps_radial[i] << ", ";
+        ps_rad[i] = ps_radial[i]/sum_ps_radial;
+    }
+
 }
