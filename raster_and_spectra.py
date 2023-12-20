@@ -4,6 +4,8 @@ import time
 from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 import sys
+import threading
+import scipy.fft
 
 
 def readStep(fname, step):
@@ -16,11 +18,27 @@ def readStep(fname, step):
         sys.exit(1)
 
 
-def rasterAndSpectra(fname, step, gridSize):
+def spherical_average(k_values, k_1d, power_spectrum, power_spectrum_radial, count, numThreads, thread_index):
+    outer_loop_step = int(len(k_1d) / numThreads)
+    for ind in range(outer_loop_step):
+        i = ind + thread_index * outer_loop_step
+        for j in range(len(k_1d)):
+            for l in range(len(k_1d)):
+                k = np.sqrt(k_values[i] ** 2 + k_values[j]
+                            ** 2 + k_values[l] ** 2)
+                k_index = np.argmin(np.abs(k_1d - k))
+                count[thread_index, k_index] += 1.0
+                power_spectrum_radial[thread_index,
+                                      k_index] += power_spectrum[i, j, l]
+
+
+def rasterAndSpectra(fname, step, gridSize, numT):
     # Record the start time
     start_time = time.time()
 
     file_name = fname
+    numThreads = numT
+    print("Number of threads = %d", numThreads)
 
     print("Reading")
     h5step = readStep(file_name, step)
@@ -28,7 +46,6 @@ def rasterAndSpectra(fname, step, gridSize):
     x = np.array(h5step["x"])
     y = np.array(h5step["y"])
     z = np.array(h5step["z"])
-    h = np.array(h5step["h"])
     vx = np.array(h5step["vx"])
     vy = np.array(h5step["vy"])
     vz = np.array(h5step["vz"])
@@ -59,7 +76,8 @@ def rasterAndSpectra(fname, step, gridSize):
     print(f"Creating KD-tree. Time: {elapsed} s")
 
     # Query the KD-Tree for nearest neighbors
-    distances, indices = kdtree.query(target_grid_points, k=1)
+    distances, indices = kdtree.query(
+        target_grid_points, k=1, workers=numThreads)
     end_time4 = time.time()
     elapsed = end_time4 - end_time3
     print(f"Querying KD-tree. Time: {elapsed} s")
@@ -77,6 +95,7 @@ def rasterAndSpectra(fname, step, gridSize):
 
     # Number of grid points in each dimension
     grid_size = mesh_resolution
+    full_grid = grid_size**3
 
     # Compute the velocity field
     vx_field = interpolated_values[:, 0].reshape(
@@ -96,23 +115,18 @@ def rasterAndSpectra(fname, step, gridSize):
     print(mean_vz)
 
     print("Calculating FFTs")
-    vx_fft = np.fft.fftn(vx_field)
-    vy_fft = np.fft.fftn(vy_field)
-    vz_fft = np.fft.fftn(vz_field)
-
-    # create array with absolute values of the FFTs
-    vx_fft = np.abs(vx_fft)
-    vy_fft = np.abs(vy_fft)
-    vz_fft = np.abs(vz_fft)
+    vx_fft = scipy.fft.fftn(vx_field, workers=numThreads)/full_grid
+    vy_fft = scipy.fft.fftn(vy_field, workers=numThreads)/full_grid
+    vz_fft = scipy.fft.fftn(vz_field, workers=numThreads)/full_grid
 
     # write values of the FFTs to a file
-    output_file_path = 'fft_data_200.txt'
-    with open(output_file_path, 'w') as output_file:
-        for i in range(grid_size):
-            for j in range(grid_size):
-                for k in range(grid_size):
-                    output_file.write(
-                        f"{vx_fft[i, j, k]}, {vy_fft[i, j, k]}, {vz_fft[i, j, k]}\n")
+    # output_file_path = 'fft_data_200.txt'
+    # with open(output_file_path, 'w') as output_file:
+    #     for i in range(grid_size):
+    #         for j in range(grid_size):
+    #             for k in range(grid_size):
+    #                 output_file.write(
+    #                     f"{vx_fft[i, j, k]}, {vy_fft[i, j, k]}, {vz_fft[i, j, k]}\n")
 
     print("Calculating Power Spectra")
     power_spectrum = (np.abs(vx_fft) ** 2 + np.abs(vy_fft)
@@ -123,27 +137,40 @@ def rasterAndSpectra(fname, step, gridSize):
 
     # Compute the 1D wavenumber array
     k_values = np.fft.fftfreq(grid_size, d=1.0 / grid_size)
-
     k_1d = np.abs(k_values)
 
     # Perform spherical averaging to get 1D power spectrum
+    print("Spherical averaging")
+    threads = [None] * numThreads
+    power_spectrum_th = np.zeros((numThreads, len(k_1d)))
+    counts_th = np.zeros((numThreads, len(k_1d)))
+    for thread_index in range(len(threads)):
+        threads[thread_index] = threading.Thread(target=spherical_average, args=(
+            k_values, k_1d, power_spectrum, power_spectrum_th, counts_th, numThreads, thread_index))
+        threads[thread_index].start()
+
+    for i in range(len(threads)):
+        threads[i].join()
+
     power_spectrum_radial = np.zeros_like(k_1d)
+    count = np.zeros_like(k_1d)
+    for i in range(len(threads)):
+        power_spectrum_radial += power_spectrum_th[i]
+        count += counts_th[i]
 
-    for i in range(grid_size):
-        for j in range(grid_size):
-            for l in range(grid_size):
-                k = np.sqrt(k_values[i] ** 2 + k_values[j]
-                            ** 2 + k_values[l] ** 2)
-                k_index = np.argmin(np.abs(k_1d - k))
-                power_spectrum_radial[k_index] += power_spectrum[i, j, l]
-
-    # Normalize the result
-    power_spectrum_radial /= np.sum(power_spectrum_radial)
-    # power_spectrum_radial *= k_1d
+    for i in range(len(k_1d)):
+        power_spectrum_radial[i] = (
+            power_spectrum_radial[i] * 4.0 * np.pi * k_1d[i]**2) / count[i]
 
     end_time7 = time.time()
     elapsed = end_time7 - end_time6
     print(f"Spherical averaging. Time: {elapsed} s")
+
+    # Total energy of the 3D FFT
+    sum_PS = np.sum(power_spectrum)
+    print(sum_PS)
+    # Total energy of the power spectra
+    print(np.sum(power_spectrum_radial[count > 0]))
 
     print("Outputing...")
 
@@ -156,12 +183,12 @@ def rasterAndSpectra(fname, step, gridSize):
     elapsed = end_time8 - end_time7
     print(f"Outputing. Time: {elapsed} s")
 
-    print("Plotting")
-
     # Plot the 1D power spectrum
+    print("Plotting")
     plt.plot(k_1d[1:], power_spectrum_radial[1:])
     plt.xscale('log')
     plt.yscale('log')
+
     # Set x-axis limit to start from 6
     plt.xlim(6, k_1d.max())
 
@@ -172,13 +199,13 @@ def rasterAndSpectra(fname, step, gridSize):
 
     plt.xlabel('Wavenumber (k)')
     plt.ylabel('E_k')
-    plt.title("Power Spectrum %s^3" % gridSize)
+    plt.title('Power Spectrum 100^3')
 
     # Add legend
     plt.legend()
 
     # Save the plot as a PNG file
-    plt.savefig("power_spectrum_%s.png" % gridSize)
+    plt.savefig("wholepower_spectrum_%s.png" % gridSize)
 
     print("Done!")
     elapsed = end_time8 - start_time
@@ -195,4 +222,7 @@ if __name__ == "__main__":
     # third cmdline argument: size of grid to interpolate to
     gridSize = sys.argv[3]
 
-    rasterAndSpectra(fname, step, gridSize)
+    # fourth cmdline argument: number of threads to use
+    numT = sys.argv[4]
+
+    rasterAndSpectra(fname, step, gridSize, numT)
