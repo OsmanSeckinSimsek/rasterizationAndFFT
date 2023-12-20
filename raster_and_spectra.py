@@ -37,8 +37,8 @@ def rasterAndSpectra(fname, step, gridSize, numT):
     start_time = time.time()
 
     file_name = fname
-    numThreads = numT
-    print("Number of threads = %d", numThreads)
+    numThreads = int(numT)
+    print("Number of threads = ", numThreads)
 
     print("Reading")
     h5step = readStep(file_name, step)
@@ -205,7 +205,7 @@ def rasterAndSpectra(fname, step, gridSize, numT):
     plt.legend()
 
     # Save the plot as a PNG file
-    plt.savefig("wholepower_spectrum_%s.png" % gridSize)
+    plt.savefig("power_spectrum_%s.png" % gridSize)
 
     print("Done!")
     elapsed = end_time8 - start_time
