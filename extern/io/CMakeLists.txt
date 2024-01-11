@@ -1,6 +1,6 @@
 
 function(enableH5Part exename)
-    if(SPH_EXA_WITH_H5PART)
+    if(ENABLE_H5PART)
         target_compile_definitions(${exename} PUBLIC SPH_EXA_HAVE_H5PART)
         target_include_directories(${exename} PUBLIC ${PROJECT_SOURCE_DIR}/extern/h5part)
 
