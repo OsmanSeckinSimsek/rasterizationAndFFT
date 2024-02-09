@@ -1,3 +1,4 @@
+set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/cstone/include)
 
 function(enableH5Part exename)
     if(ENABLE_H5PART)

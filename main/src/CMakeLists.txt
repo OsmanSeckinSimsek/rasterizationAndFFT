@@ -8,7 +8,7 @@ find_package(Heffte PATHS $(HEFFTE_PATH))
 
 set(exename power_spectrum)
 add_executable(${exename} power_spectrum.cpp)
-target_include_directories(${exename} PUBLIC ${PROJECT_SOURCE_DIR}/extern/io)
+target_include_directories(${exename} PUBLIC ${CSTONE_DIR} ${PROJECT_SOURCE_DIR}/extern/io)
 target_link_libraries(${exename} PRIVATE io OpenMP::OpenMP_CXX ${MPI_CXX_LIBRARIES} Heffte::Heffte)
 install(TARGETS ${exename} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

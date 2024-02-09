@@ -15,7 +15,8 @@ option(BUILD_TESTING "build unit and integration tests" ON)
 option(BUILD_ANALYTICAL "build analytical solution" ON)
 
 option(GPU_DIRECT "Enable CUDA-aware MPI communication" OFF)
-set(HEFFTE_PATH "/Users/simsek0003/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
+set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
+set(FFTW_PATH "$ENV{HOME}/lib_installed/fftw" CACHE PATH "Path to FFTW installation")
 
 set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/cstone/include)
 set(CSTONE_TEST_DIR ${PROJECT_SOURCE_DIR}/cstone/test)
@@ -61,9 +62,9 @@ if(CMAKE_HIP_COMPILER AND NOT CMAKE_CUDA_COMPILER)
     set(CMAKE_HIP_STANDARD 17)
 endif()
 
-option(SPH_EXA_WITH_H5PART "Enable HDF5 IO using the H5Part library" ON)
+option(ENABLE_H5PART "Enable HDF5 IO using the H5Part library" ON)
 
-if(SPH_EXA_WITH_H5PART)
+if(ENABLE_H5PART)
     set(HDF5_PREFER_PARALLEL true)
     find_package(HDF5)
 
@@ -71,7 +72,7 @@ if(SPH_EXA_WITH_H5PART)
         add_subdirectory(./extern/h5part)
     else()
         message(STATUS "No HDF5 support")
-        set(SPH_EXA_WITH_H5PART OFF)
+        set(ENABLE_H5PART OFF)
     endif()
 endif()
 

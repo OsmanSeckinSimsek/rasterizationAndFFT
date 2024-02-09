@@ -1,4 +1,4 @@
-set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/domain/include)
+set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/cstone/include)
 
 add_subdirectory(src)
 
