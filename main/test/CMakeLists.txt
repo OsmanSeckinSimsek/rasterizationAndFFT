@@ -29,6 +29,7 @@ function(addRasterizationMpiTest source exename testname ranks)
 endfunction()
 
 addRasterizationMpiTest(heffte_tests.cpp heffte_mpi HeffteDFT 4)
+addRasterizationMpiTest(mesh_tests.cpp mesh_mpi meshTest 4)
 
 # if(ENABLE_H5PART)
 # set(exename frontend_units)

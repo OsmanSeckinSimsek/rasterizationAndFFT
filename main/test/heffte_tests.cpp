@@ -30,7 +30,7 @@ int compute_dft(MPI_Comm comm)
     }
 
     // using problem with size 8x8x8 problem
-    heffte::box3d<> all_indexes({0, 0, 0}, {7, 7, 7});
+    heffte::box3d<> all_indexes({0, 0, 0}, {3, 3, 3});
 
     // see the heffte_example_options for comments on the proc_grid and boxes
     std::array<int, 3> proc_grid = heffte::proc_setup_min_surface(all_indexes, num_ranks);
@@ -52,9 +52,18 @@ int compute_dft(MPI_Comm comm)
     // vectors with the correct sizes to store the input and output data
     std::vector<double> input(fft.size_inbox());
     std::iota(input.begin(), input.end(), 0); // put some data in the input
-
+    // for (int i = 0; i < input.size(); i++)
+    // {
+    //     std::cout << input.at(i) << ",";
+    // }
+    // std::cout << std::endl;
     // output has std::vector<std::complex<double>>
     auto output = fft.forward(input, heffte::scale::symmetric);
+
+    // for (int i = 0; i < output.size(); i++)
+    // {
+    //     std::cout << abs(output.at(i)) * abs(output.at(i)) / output.size() << ",";
+    // }
 
     // in a backward transform, the result could be either real or complex
     // since the input was real, we know that the result will be real
