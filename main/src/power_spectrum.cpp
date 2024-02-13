@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "mesh.hpp"
 #include "utils.hpp"
 #include "arg_parser.hpp"
@@ -67,11 +68,11 @@ int main(int argc, char** argv)
 
     // create cornerstone tree
     std::vector<uint64_t> keys(x.size());
-    uint64_t bucketSizeFocus = 64;
-    uint64_t bucketSize      = std::max(bucketSizeFocus, numParticles / (100*numRanks));
-    float theta = 1.0;
-    cstone::Box<double> box(-0.5, 0.5, cstone::BoundaryType::open); // boundary type from file?
-    Domain domain(rank, numRanks, bucketSize, bucketSizeFocus, theta, box);
+    size_t                bucketSizeFocus = 64;
+    size_t                bucketSize      = std::max(bucketSizeFocus, numParticles / (100 * numRanks));
+    float                 theta           = 1.0;
+    cstone::Box<double>   box(-0.5, 0.5, cstone::BoundaryType::open); // boundary type from file?
+    Domain                domain(rank, numRanks, bucketSize, bucketSizeFocus, theta, box);
 
     domain.sync(keys, x, y, z, h, std::tie(vx, vy, vz), std::tie(scratch1, scratch2, scratch3));
 
