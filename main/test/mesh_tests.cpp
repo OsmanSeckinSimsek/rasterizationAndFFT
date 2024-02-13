@@ -18,6 +18,28 @@ TEST(meshTest, testFFTFreq)
     }
 }
 
+TEST(mestTest, testSetCoordinates)
+{
+    int rank = 0, numRanks = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numRanks);
+
+    int          gridSize  = 10;
+    int          numShells = gridSize / 2;
+    Mesh<double> mesh(rank, numRanks, gridSize, numShells);
+
+    std::vector<double> solution_x = {-0.5, -0.388888888888, -0.2777777777777, -0.1666666666666, -0.0555555555555,  0.0555555555555,  0.166666666666,  0.277777777777,  0.388888888888,  0.5};
+    std::vector<double> solution_y = {-0.5, -0.388888888888, -0.2777777777777, -0.1666666666666, -0.0555555555555,  0.0555555555555,  0.166666666666,  0.277777777777,  0.388888888888,  0.5};
+    std::vector<double> solution_z = {-0.5, -0.388888888888, -0.2777777777777, -0.1666666666666, -0.0555555555555,  0.0555555555555,  0.166666666666,  0.277777777777,  0.388888888888,  0.5};
+
+    for (size_t i = 0; i < mesh.x_.size(); i++)
+    {
+        EXPECT_NEAR(mesh.x_[i], solution_x[i], 1e-12);
+        EXPECT_NEAR(mesh.y_[i], solution_y[i], 1e-12);
+        EXPECT_NEAR(mesh.z_[i], solution_z[i], 1e-12);
+    }
+}
+
 TEST(meshTest, testMeshInit)
 {
     int rank = 0, numRanks = 0;

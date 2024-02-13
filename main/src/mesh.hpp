@@ -10,18 +10,28 @@ public:
     int numRanks_;
     int gridDim_; // specifically integer because heffte library uses int
     int numShells_;
+    T Lmin_;
+    T Lmax_;
 
     heffte::box3d<> inbox_;
+    // inbox coordinates in the mesh
+    std::vector<T>  x_;
+    std::vector<T>  y_;
+    std::vector<T>  z_;
+    // corresponding velocities in the mesh
     std::vector<T>  velX_;
     std::vector<T>  velY_;
     std::vector<T>  velZ_;
     std::vector<T>  power_spectrum_;
 
+    // sim box -0.5 to 0.5 by default
     Mesh(int rank, int numRanks, int gridDim, int numShells)
         : rank_(rank)
         , numRanks_(numRanks)
         , gridDim_(gridDim)
         , numShells_(numShells)
+        , Lmin_(-0.5)
+        , Lmax_(0.5)
         , inbox_(initInbox())
     {
         size_t inboxSize = static_cast<size_t>(inbox_.size[0]) * static_cast<size_t>(inbox_.size[1]) *
@@ -29,11 +39,45 @@ public:
         velX_.resize(inboxSize);
         velY_.resize(inboxSize);
         velZ_.resize(inboxSize);
+        x_.resize(inbox_.size[0]);
+        y_.resize(inbox_.size[1]);
+        z_.resize(inbox_.size[2]);
         power_spectrum_.resize(numShells);
+
+        setCoordinates(Lmin_, Lmax_);
+    }
+
+    void setSimBox(T Lmin, T Lmax)
+    {
+        Lmin_ = Lmin;
+        Lmax_ = Lmax;
+    }
+
+    void setCoordinates(T Lmin, T Lmax)
+    {
+        T deltaMesh = (Lmax - Lmin) / (gridDim_ - 1);
+
+        T displacement = inbox_.low[0] / gridDim_;
+        for (int i = 0; i < inbox_.size[0]; i++)
+        {
+            x_[i] = (Lmin + displacement) + deltaMesh * i;
+        }
+
+        displacement = inbox_.low[1] / gridDim_;
+        for (int i = 0; i < inbox_.size[1]; i++)
+        {
+            y_[i] = (Lmin + displacement) + deltaMesh * i;
+        }
+
+        displacement = inbox_.low[2] / gridDim_;
+        for (int i = 0; i < inbox_.size[2]; i++)
+        {
+            z_[i] = (Lmin + displacement) + deltaMesh * i;
+        }
     }
 
     // Placeholder, needs to be implemented mapping cornerstone tree to the mesh
-    void assign_velocities_to_mesh(T* xpos, T* ypos, T* zpos, T* vx, T* vy, T* vz, T* gridX, T* gridY, T* gridZ,
+    void assign_velocities_to_mesh(T* xpos, T* ypos, T* zpos, T* vx, T* vy, T* vz,
                                    size_t simDim, size_t gridDim)
     {
         size_t         simDim3 = simDim * simDim * simDim;
@@ -50,6 +94,7 @@ public:
 
         for (size_t i = 0; i < gridDim; i++)
         {
+            std::cout << "i: " << i << "\n";
             for (size_t j = 0; j < gridDim; j++)
             {
                 for (size_t k = 0; k < gridDim; k++)
@@ -72,9 +117,9 @@ public:
                         }
                     }
 
-                    gridX[gridIndex] = vx[min_index];
-                    gridY[gridIndex] = vy[min_index];
-                    gridZ[gridIndex] = vz[min_index];
+                    velX_[gridIndex] = vx[min_index];
+                    velY_[gridIndex] = vy[min_index];
+                    velZ_[gridIndex] = vz[min_index];
                 }
             }
         }
