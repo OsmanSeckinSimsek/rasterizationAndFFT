@@ -4,7 +4,7 @@ function(enableGpuDirect exename)
     endif()
 endfunction()
 
-find_package(Heffte PATHS $(HEFFTE_PATH))
+# find_package(Heffte PATHS $(HEFFTE_PATH))
 
 set(exename power_spectrum)
 add_executable(${exename} power_spectrum.cpp)

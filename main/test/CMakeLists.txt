@@ -2,8 +2,8 @@ include(rasterization_add_test)
 
 # set(UNIT_TESTS
 # test_main.cpp)
-find_package(Heffte PATHS $(HEFFTE_PATH))
-find_package(FFTW3 PATHS $(FFTW_PATH))
+# find_package(Heffte PATHS $(HEFFTE_PATH))
+# find_package(FFTW3 PATHS $(FFTW_PATH))
 
 if(FFTW3_FOUND)
     message(STATUS "Found FFTW3: ${FFTW3_INCLUDE_DIRS}")
