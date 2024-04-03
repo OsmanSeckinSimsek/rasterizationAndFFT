@@ -1,6 +1,9 @@
 #include <vector>
 #include <limits>
 #include "heffte.h"
+#include "cstone/domain/domain.hpp"
+
+using KeyType = uint64_t;
 
 template<typename T>
 class Mesh
@@ -14,7 +17,7 @@ public:
     T Lmax_;
 
     heffte::box3d<> inbox_;
-    // inbox coordinates in the mesh
+    // coordinate centers in the mesh
     std::vector<T>  x_;
     std::vector<T>  y_;
     std::vector<T>  z_;
@@ -53,27 +56,99 @@ public:
         Lmax_ = Lmax;
     }
 
+    // Calculates the volume centers instead of starting with Lmin and adding deltaMesh
     void setCoordinates(T Lmin, T Lmax)
     {
-        T deltaMesh = (Lmax - Lmin) / (gridDim_ - 1);
+        T deltaMesh = (Lmax - Lmin) / (gridDim_);
+        T centerCoord = deltaMesh / 2;
+        T startingCoord = Lmin + centerCoord;
 
         T displacement = inbox_.low[0] / gridDim_;
         for (int i = 0; i < inbox_.size[0]; i++)
         {
-            x_[i] = (Lmin + displacement) + deltaMesh * i;
+            x_[i] = (startingCoord + displacement) + deltaMesh * i;
         }
 
         displacement = inbox_.low[1] / gridDim_;
         for (int i = 0; i < inbox_.size[1]; i++)
         {
-            y_[i] = (Lmin + displacement) + deltaMesh * i;
+            y_[i] = (startingCoord + displacement) + deltaMesh * i;
         }
 
         displacement = inbox_.low[2] / gridDim_;
         for (int i = 0; i < inbox_.size[2]; i++)
         {
-            z_[i] = (Lmin + displacement) + deltaMesh * i;
+            z_[i] = (startingCoord + displacement) + deltaMesh * i;
         }
+    }
+
+    void rasterize_using_cornerstone(std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
+                                    std::vector<T> z, std::vector<T> vx, std::vector<T> vy,
+                                    std::vector<T> vz,int powerDim)
+    {
+        // int powerDim = std::ceil(std::log(simDim)/std::log(2));
+
+        // iterate over the the mesh volumes that belong to this rank
+        // #pragma omp parallel for
+        for (int i = inbox_.low[0]; i < inbox_.high[0] - 1; i++)
+        {
+            // std::cout << "index: " << i << std::endl;
+            unsigned iSFC_low = i * std::pow(2, (21-powerDim));
+            unsigned iSFC_up = (i+1) * std::pow(2, (21-powerDim));
+            for (int j = inbox_.low[1]; j < inbox_.high[1] - 1; j++)
+            {
+                unsigned jSFC_low = j * std::pow(2, (21-powerDim));
+                unsigned jSFC_up = (j+1) * std::pow(2, (21-powerDim));
+                for (int k = inbox_.low[2]; k < inbox_.high[2] - 1; k++)
+                {
+                    unsigned kSFC_low = k * std::pow(2, (21-powerDim));
+                    unsigned kSFC_up = (k+1) * std::pow(2, (21-powerDim));
+
+                    KeyType lowerKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_low, jSFC_low, kSFC_low);
+                    KeyType upperKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_up, jSFC_up, kSFC_up);
+
+                    unsigned level = cstone::commonPrefix(lowerKey, upperKey) / 3;
+                    KeyType lowerBound = cstone::enclosingBoxCode(lowerKey, level);
+                    KeyType upperBound =  lowerBound + cstone::nodeRange<KeyType>(level);
+
+                    auto itlow = std::lower_bound(keys.begin(), keys.end(), lowerBound);
+                    auto itup = std::upper_bound(keys.begin(), keys.end(), upperBound);
+                    std::cout << "index: " << std::distance(itlow, itup) << std::endl;
+
+                    size_t min_distance_index = 0;
+                    T min_distance = std::numeric_limits<T>::infinity();
+
+                    // iterate from itlow to itup to find the min distance to the center of the volume
+                    for (auto it = itlow; it != itup; it++)
+                    {
+                        // std::cout << "key: " << *it << std::endl;
+                        auto index = std::distance(keys.begin(), it);
+                        // std::cout << "index: " << index << std::endl;
+
+                        T xDistance = std::pow(x[index] - x_[i], 2);
+                        T yDistance = std::pow(y[index] - y_[j], 2);
+                        T zDistance = std::pow(z[index] - z_[k], 2);
+                        T distance  = std::sqrt(xDistance + yDistance + zDistance);
+                        if (distance < min_distance)
+                        {
+                            min_distance = distance;
+                            min_distance_index = index;
+                        }
+                    }
+
+                    // min distance found, assign the velocity to the mesh volume
+                    if (min_distance_index != -1)
+                    {
+                        size_t velIndex = (i * inbox_.size[1] + j) * inbox_.size[2] + k;
+                        velX_[velIndex] = vx[min_distance_index];
+                        velY_[velIndex] = vy[min_distance_index];
+                        velZ_[velIndex] = vz[min_distance_index];
+                    }
+                }
+            }
+        }
+
+        // if the volume belongs to another rank, transfer the info
     }
 
     // Placeholder, needs to be implemented mapping cornerstone tree to the mesh
@@ -210,6 +285,7 @@ public:
         std::vector<T> k_values(gridDim_);
         std::vector<T> k_1d(gridDim_);
         std::vector<T> ps_rad(numShells_);
+        std::vector<int> count(k_1d.size());
 
         fftfreq(k_values, gridDim_, 1.0 / gridDim_);
 
@@ -243,6 +319,7 @@ public:
                     size_t k_index = std::distance(std::begin(k_dif), it);
 
                     ps_rad[k_index] += ps[freq_index];
+                    count[k_index]++;
                 }
             }
         }
@@ -254,9 +331,11 @@ public:
         {
             T sum_ps_radial = std::accumulate(power_spectrum_.begin(), power_spectrum_.end(), 0.0);
 
+            std::cout << "sum_ps_radial: " << sum_ps_radial << std::endl;
+
             for (int i = 0; i < numShells_; i++)
             {
-                power_spectrum_[i] = power_spectrum_[i] / sum_ps_radial;
+                power_spectrum_[i] = (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i],2) )/ count[i];
             }
         }
     }
