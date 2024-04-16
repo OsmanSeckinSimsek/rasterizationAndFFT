@@ -25,6 +25,8 @@ public:
     std::vector<T>  velX_;
     std::vector<T>  velY_;
     std::vector<T>  velZ_;
+    // particle's distance to mesh point
+    std::vector<T>  distance_;
     std::vector<T>  power_spectrum_;
 
     // sim box -0.5 to 0.5 by default
@@ -45,7 +47,10 @@ public:
         x_.resize(inbox_.size[0]);
         y_.resize(inbox_.size[1]);
         z_.resize(inbox_.size[2]);
+        distance_.resize(inboxSize);
         power_spectrum_.resize(numShells);
+
+        std::fill(distance_.begin(), distance_.end(), std::numeric_limits<T>::infinity());
 
         setCoordinates(Lmin_, Lmax_);
     }
@@ -119,6 +124,7 @@ public:
                     T min_distance = std::numeric_limits<T>::infinity();
 
                     // iterate from itlow to itup to find the min distance to the center of the volume
+                    // std::cout << "i: " << i << " j: " << j << " k: " << k << "low: " << itlow << "high: " << itup<< std::endl;
                     for (auto it = itlow; it != itup; it++)
                     {
                         // std::cout << "key: " << *it << std::endl;
@@ -137,7 +143,7 @@ public:
                     }
 
                     // min distance found, assign the velocity to the mesh volume
-                    if (min_distance_index != -1)
+                    if (min_distance != std::numeric_limits<T>::infinity())
                     {
                         size_t velIndex = (i * inbox_.size[1] + j) * inbox_.size[2] + k;
                         velX_[velIndex] = vx[min_distance_index];
@@ -335,7 +341,8 @@ public:
 
             for (int i = 0; i < numShells_; i++)
             {
-                power_spectrum_[i] = (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i],2) )/ count[i];
+                if (count[i] != 0)
+                    power_spectrum_[i] = (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i],2) )/ count[i];
             }
         }
     }
