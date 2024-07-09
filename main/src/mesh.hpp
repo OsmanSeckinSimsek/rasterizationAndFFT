@@ -61,6 +61,78 @@ public:
         Lmax_ = Lmax;
     }
 
+    T calculateDistance(T x, T y, T z, int i, int j, int k)
+    {
+        T xDistance = std::pow(x - x_[i], 2);
+        T yDistance = std::pow(y - y_[j], 2);
+        T zDistance = std::pow(z - z_[k], 2);
+        return std::sqrt(xDistance + yDistance + zDistance);
+    }
+
+    void assignVelocityByMeshCoord(int x, int y, int z, T distance, T velox, T veloy, T veloz)
+    {
+        // std::cout << "mesh coords: " << x_[x] << ", " << y_[y] << ", " << z_[z] << std::endl;
+        size_t index = (x * inbox_.size[0] + y) * inbox_.size[1] + z;
+
+        if (distance < distance_[index])
+        {
+            velX_[index] = velox;
+            velY_[index] = veloy;
+            velZ_[index] = veloz;
+            distance_[index] = distance;
+        }
+    }
+
+    void extrapolateEmptyCellsFromNeighbors()
+    {
+        for (int i = inbox_.low[0]; i < inbox_.high[0]; i++)
+        {
+            for (int j = inbox_.low[1]; j < inbox_.high[1]; j++)
+            {
+                for (int k = inbox_.low[2]; k < inbox_.high[2]; k++)
+                {
+                    size_t index = (i * inbox_.size[0] + j) * inbox_.size[1] + k;
+                    if (distance_[index] == std::numeric_limits<T>::infinity())
+                    {
+                        // iterate over the neighbors and average the velocities of the neighbors which have a distance assigned
+                        T velXSum = 0;
+                        T velYSum = 0;
+                        T velZSum = 0;
+                        int count = 0;
+                        for (int ni = i - 1; ni <= i + 1; ni++)
+                        {
+                            for (int nj = j - 1; nj <= j + 1; nj++)
+                            {
+                                for (int nk = k - 1; nk <= k + 1; nk++)
+                                {
+                                    if (ni >= inbox_.low[0] && ni < inbox_.high[0] && nj >= inbox_.low[1] &&
+                                        nj < inbox_.high[1] && nk >= inbox_.low[2] && nk < inbox_.high[2])
+                                    {
+                                        size_t neighborIndex = (ni * inbox_.size[0] + nj) * inbox_.size[1] + nk;
+                                        if (distance_[neighborIndex] != std::numeric_limits<T>::infinity())
+                                        {
+                                            velXSum += velX_[neighborIndex];
+                                            velYSum += velY_[neighborIndex];
+                                            velZSum += velZ_[neighborIndex];
+                                            count++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (count > 0)
+                        {
+                            velX_[index] = velXSum / count;
+                            velY_[index] = velYSum / count;
+                            velZ_[index] = velZSum / count;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Calculates the volume centers instead of starting with Lmin and adding deltaMesh
     void setCoordinates(T Lmin, T Lmax)
     {

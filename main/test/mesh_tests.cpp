@@ -129,6 +129,46 @@ TEST(meshTest, testSphericalAveraging)
     mesh.perform_spherical_averaging(freqVelo.data());
 }
 
+std::tuple<int,int,int> printKeyIndices(KeyType key, int powerDim)
+{
+    auto mesh_indices = cstone::decodeHilbert(key);
+    unsigned divisor = std::pow(2, (21-powerDim));
+
+    int meshCoordX_base = std::get<0>(mesh_indices)/divisor;
+    int meshCoordY_base = std::get<1>(mesh_indices)/divisor;
+    int meshCoordZ_base = std::get<2>(mesh_indices)/divisor;
+
+    std::cout << "key: " << key << " mesh indices: " << meshCoordX_base << " " << meshCoordY_base << " " << meshCoordZ_base << std::endl;
+    return std::tie(meshCoordX_base, meshCoordY_base, meshCoordZ_base);
+}
+
+void tryDifferentIndices(std::vector<KeyType> keys, int powerDim, int startx, int starty, int startz, int endx, int endy, int endz)
+{
+    int meshKeySize = std::pow(2, (21-powerDim));
+    unsigned iSFC_low = startx * meshKeySize;
+    unsigned iSFC_up = endx * meshKeySize;
+    unsigned jSFC_low = starty * meshKeySize;
+    unsigned jSFC_up = endy * meshKeySize;
+    unsigned kSFC_low = startz * meshKeySize;
+    unsigned kSFC_up = endz * meshKeySize;
+
+    KeyType lowerKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_low, jSFC_low, kSFC_low);
+    KeyType upperKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_up, jSFC_up, kSFC_up);
+
+    unsigned level = cstone::commonPrefix(lowerKey, upperKey) / 3;
+    KeyType lowerBound = cstone::enclosingBoxCode(lowerKey, level);
+    KeyType upperBound =  lowerBound + cstone::nodeRange<KeyType>(level);
+
+    printKeyIndices(lowerKey, powerDim);
+    printKeyIndices(upperKey, powerDim);
+    printKeyIndices(lowerBound, powerDim);
+    printKeyIndices(upperBound, powerDim);
+
+    auto itlow = std::lower_bound(keys.begin(), keys.end(), lowerKey);
+    auto itup = std::upper_bound(keys.begin(), keys.end(), upperKey);
+    std::cout << "index from key: " << std::distance(itlow, itup) << std::endl;
+}
+
 
 TEST(meshTest, testCornerstoneRasterization)
 {
@@ -142,8 +182,8 @@ TEST(meshTest, testCornerstoneRasterization)
 
     using Domain = cstone::Domain<KeyType, CoordinateType, cstone::CpuTag>;
 
-    int domainSize = 8;
-    int numParticles = domainSize * domainSize * domainSize;
+    int domainSize = 4;
+    int numParticles = domainSize*domainSize*domainSize;
 
     std::vector<double>  x(numParticles);
     std::vector<double>  y(numParticles);
@@ -156,7 +196,7 @@ TEST(meshTest, testCornerstoneRasterization)
     std::vector<double> scratch2(x.size());
     std::vector<double> scratch3(x.size());
 
-    std::vector<double> coords = {-0.4, -0.35, -0.2, -0.07, 0.07, 0.2, 0.35, 0.4};
+    std::vector<double> coords = {-0.4, -0.1, 0.1, 0.4};
 
     int powerDim = std::ceil(std::log(domainSize)/std::log(2));
     int gridDim = std::pow(2, powerDim); // dimension of the mesh
@@ -194,54 +234,140 @@ TEST(meshTest, testCornerstoneRasterization)
 
     domain.sync(keys, x, y, z, h, std::tie(vx, vy, vz), std::tie(scratch1, scratch2, scratch3));
 
-    std::vector<double> mesh_coords = {-0.5, -0.375, -0.25, -0.125, 0, 0.125, 0.25, 0.375, 0.5};
-
-    // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
-    int iter = domainSize;
-    int meshKeySize = std::pow(2, (21-powerDim));
-
-    for (int i = 0; i < iter - 1; i++)
+    int index = 0;
+    // iterate over keys vector
+    for (auto it = keys.begin(); it != keys.end(); ++it)
     {
-        for (int j = 0; j < iter - 1; j++)
-        {
-            for (int k = 0; k < iter - 1; k++)
-            {
-                unsigned iSFC_low = i * meshKeySize;
-                unsigned iSFC_up = (i+1) * meshKeySize;
-                unsigned jSFC_low = j * meshKeySize;
-                unsigned jSFC_up = (j+1) * meshKeySize;
-                unsigned kSFC_low = k * meshKeySize;
-                unsigned kSFC_up = (k+1) * meshKeySize;
-
-                KeyType lowerKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_low, jSFC_low, kSFC_low);
-                KeyType upperKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_up, jSFC_up, kSFC_up);
-
-                unsigned level = cstone::commonPrefix(lowerKey, upperKey) / 3;
-                KeyType lowerBound = cstone::enclosingBoxCode(lowerKey, level);
-                KeyType upperBound =  lowerBound + cstone::nodeRange<KeyType>(level);
-
-                auto itlow = std::lower_bound(keys.begin(), keys.end(), lowerBound);
-                auto itup = std::upper_bound(keys.begin(), keys.end(), upperBound);
-                std::cout << "index from key: " << std::distance(itlow, itup) << std::endl;
-
-                KeyType lowerKeyFromCoord = cstone::sfc3D<cstone::SfcKind<KeyType>>(mesh_coords[i], mesh_coords[j], mesh_coords[k], box);
-                KeyType upperKeyFromCoord = cstone::sfc3D<cstone::SfcKind<KeyType>>(mesh_coords[i+1], mesh_coords[j+1], mesh_coords[k+1], box);
-                std::cout << "Coord key search x = " << mesh_coords[i] << " and " << mesh_coords[i+1] << " y = " 
-                                                     << mesh_coords[j] << " and " << mesh_coords[j+1] << " z = " 
-                                                     << mesh_coords[k] << " and " << mesh_coords[k+1] << std::endl;
-
-                level = cstone::commonPrefix(lowerKeyFromCoord, upperKeyFromCoord) / 3;
-                lowerBound = cstone::enclosingBoxCode(lowerKeyFromCoord, level);
-                upperBound =  lowerBound + cstone::nodeRange<KeyType>(level);
-
-                itlow = std::lower_bound(keys.begin(), keys.end(), lowerBound);
-                itup = std::upper_bound(keys.begin(), keys.end(), upperBound);
-                std::cout << "index from coord: " << std::distance(itlow, itup) << std::endl;
-
-                theta = 1.0;
-            }
-        }
+        std::cout << "particle coords: " << x[index] << ", " << y[index] << ", " << z[index] << std::endl;
+        auto crd = printKeyIndices(*it, powerDim);
+        double distance = mesh.calculateDistance(x[index], y[index], z[index], std::get<0>(crd), std::get<1>(crd), std::get<2>(crd));
+        mesh.assignVelocityByMeshCoord(std::get<0>(crd), std::get<1>(crd), std::get<2>(crd), distance, vx[index], vy[index], vz[index]);
+        index++;
     }
+
+    // extrapolate mesh cells which doesn't have any particles assigned
+    mesh.extrapolateEmptyCellsFromNeighbors();
 
     std::cout << "rasterized" << std::endl;
 }
+
+// TEST(meshTest, testCornerstoneRasterization)
+// {
+//     int rank = 0, numRanks = 0;
+//     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+//     MPI_Comm_size(MPI_COMM_WORLD, &numRanks);
+
+//     using KeyType = uint64_t;
+//     using CoordinateType = double;
+//     using MeshType = double;
+
+//     using Domain = cstone::Domain<KeyType, CoordinateType, cstone::CpuTag>;
+
+//     int domainSize = 8;
+//     int numParticles = domainSize * domainSize * domainSize;
+
+//     std::vector<double>  x(numParticles);
+//     std::vector<double>  y(numParticles);
+//     std::vector<double>  z(numParticles);
+//     std::vector<double>  h(numParticles);
+//     std::vector<double> vx(numParticles);
+//     std::vector<double> vy(numParticles);
+//     std::vector<double> vz(numParticles);
+//     std::vector<double> scratch1(x.size());
+//     std::vector<double> scratch2(x.size());
+//     std::vector<double> scratch3(x.size());
+
+//     std::vector<double> coords = {-0.4, -0.35, -0.2, -0.07, 0.07, 0.2, 0.35, 0.4};
+
+//     int powerDim = std::ceil(std::log(domainSize)/std::log(2));
+//     int gridDim = std::pow(2, powerDim); // dimension of the mesh
+//     int numShells = gridDim/2; // default number of shells is half of the mesh dimension
+
+//     for (int i = 0; i < domainSize; i++)
+//     {
+//         for (int j = 0; j < domainSize; j++)
+//         {
+//             for (int k = 0; k < domainSize; k++)
+//             {
+//                 int index = (i * domainSize + j) * domainSize + k;
+//                 x[index] = coords[i];
+//                 y[index] = coords[j];
+//                 z[index] = coords[k];
+//                 vx[index] = index;
+//                 vy[index] = index;
+//                 vz[index] = index;
+//             }
+//         }
+//     }
+
+//     // init mesh, sim box -0.5 to 0.5 by default
+//     Mesh<MeshType> mesh(rank, numRanks, gridDim, numShells);
+
+//     // mesh.assign_velocities_to_mesh(x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(), simDim, gridDim);
+
+//     // create cornerstone tree
+//     std::vector<KeyType> keys(x.size());
+//     size_t               bucketSizeFocus = 64;
+//     size_t               bucketSize      = bucketSizeFocus;//std::max(bucketSizeFocus, numParticles / (100 * numRanks));
+//     float                theta           = 1.0;
+//     cstone::Box<double>  box(-0.5, 0.5, cstone::BoundaryType::open); // boundary type from file?
+//     Domain               domain(rank, numRanks, bucketSize, bucketSizeFocus, theta, box);
+
+//     domain.sync(keys, x, y, z, h, std::tie(vx, vy, vz), std::tie(scratch1, scratch2, scratch3));
+
+//     std::vector<double> mesh_coords = {-0.5, -0.375, -0.25, -0.125, 0, 0.125, 0.25, 0.375, 0.5};
+
+//     // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
+//     int iter = domainSize;
+//     int meshKeySize = std::pow(2, (21-powerDim));
+
+//     for (int i = 0; i < iter - 1; i++)
+//     {
+//         for (int j = 0; j < iter - 1; j++)
+//         {
+//             for (int k = 0; k < iter - 1; k++)
+//             {
+//                 unsigned iSFC_low = i * meshKeySize;
+//                 unsigned iSFC_up = (i+1) * meshKeySize;
+//                 unsigned jSFC_low = j * meshKeySize;
+//                 unsigned jSFC_up = (j+1) * meshKeySize;
+//                 unsigned kSFC_low = k * meshKeySize;
+//                 unsigned kSFC_up = (k+1) * meshKeySize;
+
+//                 KeyType lowerKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_low, jSFC_low, kSFC_low);
+//                 KeyType upperKey = cstone::iSfcKey<cstone::SfcKind<KeyType>>(iSFC_up, jSFC_up, kSFC_up);
+
+//                 unsigned level = cstone::commonPrefix(lowerKey, upperKey) / 3;
+//                 KeyType lowerBound = cstone::enclosingBoxCode(lowerKey, level);
+//                 KeyType upperBound =  lowerBound + cstone::nodeRange<KeyType>(level);
+
+//                 printKeyIndices(lowerKey, powerDim);
+//                 printKeyIndices(upperKey, powerDim);
+//                 printKeyIndices(lowerBound, powerDim);
+//                 printKeyIndices(upperBound, powerDim);
+
+//                 auto itlow = std::lower_bound(keys.begin(), keys.end(), lowerKey);
+//                 auto itup = std::upper_bound(keys.begin(), keys.end(), upperKey);
+//                 std::cout << "index from key: " << std::distance(itlow, itup) << std::endl;
+
+//                 KeyType lowerKeyFromCoord = cstone::sfc3D<cstone::SfcKind<KeyType>>(mesh_coords[i], mesh_coords[j], mesh_coords[k], box);
+//                 KeyType upperKeyFromCoord = cstone::sfc3D<cstone::SfcKind<KeyType>>(mesh_coords[i+1], mesh_coords[j+1], mesh_coords[k+1], box);
+//                 std::cout << "Coord key search x = " << mesh_coords[i] << " and " << mesh_coords[i+1] << " y = " 
+//                                                      << mesh_coords[j] << " and " << mesh_coords[j+1] << " z = " 
+//                                                      << mesh_coords[k] << " and " << mesh_coords[k+1] << std::endl;
+
+//                 level = cstone::commonPrefix(lowerKeyFromCoord, upperKeyFromCoord) / 3;
+//                 lowerBound = cstone::enclosingBoxCode(lowerKeyFromCoord, level);
+//                 upperBound =  lowerBound + cstone::nodeRange<KeyType>(level);
+
+//                 itlow = std::lower_bound(keys.begin(), keys.end(), lowerBound);
+//                 itup = std::upper_bound(keys.begin(), keys.end(), upperBound);
+//                 std::cout << "index from coord: " << std::distance(itlow, itup) << std::endl;
+
+//                 theta = 1.0;
+//             }
+//         }
+//     }
+
+//     std::cout << "rasterized" << std::endl;
+// }
