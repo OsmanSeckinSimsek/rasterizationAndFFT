@@ -5,10 +5,13 @@ function(enableGpuDirect exename)
 endfunction()
 
 # find_package(Heffte PATHS $(HEFFTE_PATH))
+set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
 
 set(exename power_spectrum)
 add_executable(${exename} power_spectrum.cpp)
-target_include_directories(${exename} PUBLIC ${CSTONE_DIR} ${PROJECT_SOURCE_DIR}/extern/io)
+message(HEFFTE_INC_DIR="${HEFFTE_PATH}/include")
+message("${CSTONE_DIR}")
+target_include_directories(${exename} PUBLIC ${CSTONE_DIR} ${PROJECT_SOURCE_DIR}/extern/io ${HEFFTE_INC_DIR})
 target_link_libraries(${exename} PRIVATE io OpenMP::OpenMP_CXX ${MPI_CXX_LIBRARIES} Heffte::Heffte)
 install(TARGETS ${exename} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
