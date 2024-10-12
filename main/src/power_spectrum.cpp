@@ -10,20 +10,6 @@ using namespace sphexa;
 void printSpectrumHelp(char* binName, int rank);
 using MeshType = double;
 
-
-std::tuple<int,int,int> calculateKeyIndices(KeyType key, int powerDim)
-{
-    auto mesh_indices = cstone::decodeHilbert(key);
-    unsigned divisor = std::pow(2, (21-powerDim));
-
-    int meshCoordX_base = std::get<0>(mesh_indices)/divisor;
-    int meshCoordY_base = std::get<1>(mesh_indices)/divisor;
-    int meshCoordZ_base = std::get<2>(mesh_indices)/divisor;
-
-    // std::cout << "key: " << key << " mesh indices: " << meshCoordX_base << " " << meshCoordY_base << " " << meshCoordZ_base << std::endl;
-    return std::tie(meshCoordX_base, meshCoordY_base, meshCoordZ_base);
-}
-
 int main(int argc, char** argv)
 {
     auto [rank, numRanks] = initMpi();
@@ -66,7 +52,7 @@ int main(int argc, char** argv)
     reader->readField("x", x.data());
     reader->readField("y", y.data());
     reader->readField("z", z.data());
-    reader->readField("h", h.data());
+    // reader->readField("h", h.data());
     reader->readField("vx", vx.data());
     reader->readField("vy", vy.data());
     reader->readField("vz", vz.data());
@@ -89,23 +75,16 @@ int main(int argc, char** argv)
     size_t               bucketSizeFocus = 64;
     size_t               bucketSize      = std::max(bucketSizeFocus, numParticles / (100 * numRanks));
     float                theta           = 1.0;
-    cstone::Box<double>  box(-0.5, 0.5, cstone::BoundaryType::open); // boundary type from file?
+    cstone::Box<double>  box(-0.5, 0.5, cstone::BoundaryType::periodic); // boundary type from file?
     Domain               domain(rank, numRanks, bucketSize, bucketSizeFocus, theta, box);
 
     domain.sync(keys, x, y, z, h, std::tie(vx, vy, vz), std::tie(scratch1, scratch2, scratch3));
+    std::cout << "rank = " << rank << " numLocalParticles after sync = " << domain.nParticles() << std::endl;
+    std::cout << "rank = " << rank << " numLocalParticleswithHalos after sync = " << domain.nParticlesWithHalos() << std::endl;
+    std::cout << "rank = " << rank << " keys size after sync = " << keys.size() << std::endl;
+    // std::cout << "rank = " << rank << " keys.begin = " << *keys.begin() << " keys.end = " << *keys.end() << std::endl;
 
-    int index = 0;
-    // iterate over keys vector
-    for (auto it = keys.begin(); it != keys.end(); ++it)
-    {
-        auto crd = calculateKeyIndices(*it, powerDim);
-        double distance = mesh.calculateDistance(x[index], y[index], z[index], std::get<0>(crd), std::get<1>(crd), std::get<2>(crd));
-        mesh.assignVelocityByMeshCoord(std::get<0>(crd), std::get<1>(crd), std::get<2>(crd), distance, vx[index], vy[index], vz[index]);
-        index++;
-    }
-
-    // extrapolate mesh cells which doesn't have any particles assigned
-    mesh.extrapolateEmptyCellsFromNeighbors();
+    mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
 
     // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
     std::cout << "rasterized" << std::endl;
