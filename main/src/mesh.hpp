@@ -108,7 +108,7 @@ public:
             int indexi = std::get<0>(crd);
             int indexj = std::get<1>(crd);
             int indexk = std::get<2>(crd);
-
+            
             assert(indexi < std::pow(2, powerDim));
             assert(indexj < std::pow(2, powerDim));
             assert(indexk < std::pow(2, powerDim));
@@ -249,14 +249,20 @@ public:
                         int count = 0;
                         for (int ni = i - 1; ni <= i + 1; ni++)
                         {
+                            if (ni < 0 || ni >= inbox_.size[2])
+                                continue;
                             for (int nj = j - 1; nj <= j + 1; nj++)
                             {
+                                if (nj < 0 || nj >= inbox_.size[1])
+                                    continue;                                
                                 for (int nk = k - 1; nk <= k + 1; nk++)
                                 {
-                                    if (ni >= 0 && ni < inbox_.size[0] && nj >= 0 &&
-                                        nj < inbox_.size[1] && nk >= 0 && nk < inbox_.size[2])
+                                    if (nk < 0 || nk >= inbox_.size[0])
+                                        continue;
+                                    else
                                     {
                                         uint64_t neighborIndex = (ni * inbox_.size[1] + nj) * inbox_.size[0] + nk;
+                                        assert(neighborIndex < inbox_.size[0] * inbox_.size[1] * inbox_.size[2]);
                                         if (distance_[neighborIndex] != std::numeric_limits<T>::infinity())
                                         {
                                             velXSum += velX_[neighborIndex];
@@ -372,6 +378,7 @@ public:
         std::vector<T> k_1d(gridDim_);
         std::vector<T> ps_rad(numShells_);
         std::vector<int> count(k_1d.size());
+        std::vector<int> counts(k_1d.size(), 0);
 
         fftfreq(k_values, gridDim_, 1.0 / gridDim_);
 
@@ -387,7 +394,7 @@ public:
             {
                 for (int k = 0; k < inbox_.size[0]; k++) // fast heffte order
                 {
-                    uint64_t freq_index = (i * inbox_.size[1] + j) * inbox_.size[0] + k;
+                    uint64_t freq_index = k + j * inbox_.size[0] + i * inbox_.size[0] * inbox_.size[1];
 
                     // Calculate the k indices with respect to the global mesh
                     uint64_t k_index_i = i + inbox_.low[2];
@@ -411,6 +418,7 @@ public:
         }
 
         MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(count.data(), counts.data(), numShells_, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
         // normalize the power spectrum
         if (rank_ == 0)
@@ -422,7 +430,7 @@ public:
             for (int i = 0; i < numShells_; i++)
             {
                 if (count[i] != 0)
-                    power_spectrum_[i] = (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i],2) )/ count[i];
+                    power_spectrum_[i] = (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i],2) )/ counts[i];
             }
         }
     }
