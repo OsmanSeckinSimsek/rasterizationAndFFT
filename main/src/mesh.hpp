@@ -117,6 +117,10 @@ public:
             assignVelocityByMeshCoord(indexi, indexj, indexk, distance, vx[particleIndex], vy[particleIndex], vz[particleIndex]);
             particleIndex++;
         }
+        x.clear();
+        y.clear();
+        z.clear();
+        
         std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
         for (int i = 0; i < numRanks_; i++)
             std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
@@ -233,6 +237,8 @@ public:
     void extrapolateEmptyCellsFromNeighbors()
     {
         std::cout << "rank = " << rank_ << " extrapolate cells" << std::endl;
+
+        #pragma omp parallel for collapse(3)
         for (int i = 0; i < inbox_.size[2]; i++)
         {
             for (int j = 0; j < inbox_.size[1]; j++)
@@ -250,7 +256,7 @@ public:
                         for (int ni = i - 1; ni <= i + 1; ni++)
                         {
                             if (ni < 0 || ni >= inbox_.size[2])
-                                continue;
+                            continue;
                             for (int nj = j - 1; nj <= j + 1; nj++)
                             {
                                 if (nj < 0 || nj >= inbox_.size[1])
@@ -258,7 +264,7 @@ public:
                                 for (int nk = k - 1; nk <= k + 1; nk++)
                                 {
                                     if (nk < 0 || nk >= inbox_.size[0])
-                                        continue;
+                                    continue;
                                     else
                                     {
                                         uint64_t neighborIndex = (ni * inbox_.size[1] + nj) * inbox_.size[0] + nk;
@@ -294,6 +300,7 @@ public:
         std::vector<T> freqVelo(velX_.size());
 
         // calculate the modulus of the velocity frequencies
+        #pragma omp parallel for
         for (uint64_t i = 0; i < velX_.size(); i++)
         {
             freqVelo[i] = velX_[i] + velY_[i] + velZ_[i];
@@ -320,6 +327,7 @@ public:
         // divide the fft.forward results by the mesh size as the first step of normalization
         fft.forward(velX_.data(), output.data());
 
+        #pragma omp parallel for
         for (uint64_t i = 0; i < velX_.size(); i++)
         {
             T out    = abs(output.at(i)) / meshSize;
@@ -328,6 +336,7 @@ public:
 
         fft.forward(velY_.data(), output.data());
 
+        #pragma omp parallel for
         for (uint64_t i = 0; i < velY_.size(); i++)
         {
             T out    = abs(output.at(i)) / meshSize;
@@ -336,6 +345,7 @@ public:
 
         fft.forward(velZ_.data(), output.data());
 
+        #pragma omp parallel for
         for (uint64_t i = 0; i < velZ_.size(); i++)
         {
             T out    = abs(output.at(i)) / meshSize;
@@ -382,12 +392,14 @@ public:
 
         fftfreq(k_values, gridDim_, 1.0 / gridDim_);
 
+        #pragma omp parallel for
         for (int i = 0; i < gridDim_; i++)
         {
             k_1d[i] = std::abs(k_values[i]);
         }
 
         // iterate over the ps array and assign the values to the correct radial bin
+        #pragma omp parallel for collapse(3)
         for (int i = 0; i < inbox_.size[2]; i++) // slow heffte order
         {
             for (int j = 0; j < inbox_.size[1]; j++) // mid heffte order
@@ -401,9 +413,10 @@ public:
                     uint64_t k_index_j = j + inbox_.low[1];
                     uint64_t k_index_k = k + inbox_.low[0];
                     T      kdist     = std::sqrt(k_values[k_index_i] * k_values[k_index_i] +
-                                                         k_values[k_index_j] * k_values[k_index_j] +
-                                                         k_values[k_index_k] * k_values[k_index_k]);
+                                    k_values[k_index_j] * k_values[k_index_j] +
+                                    k_values[k_index_k] * k_values[k_index_k]);
                     std::vector<T> k_dif(gridDim_);
+
                     for (int kind = 0; kind < gridDim_; kind++)
                     {
                         k_dif[kind] = std::abs(k_1d[kind] - kdist);
@@ -411,7 +424,9 @@ public:
                     auto   it      = std::min_element(std::begin(k_dif), std::end(k_dif));
                     uint64_t k_index = std::distance(std::begin(k_dif), it);
 
+                    #pragma omp atomic
                     ps_rad[k_index] += ps[freq_index];
+                    #pragma omp atomic
                     count[k_index]++;
                 }
             }
@@ -427,6 +442,7 @@ public:
 
             std::cout << "sum_ps_radial: " << sum_ps_radial << std::endl;
 
+            #pragma omp parallel for
             for (int i = 0; i < numShells_; i++)
             {
                 if (count[i] != 0)
@@ -515,23 +531,12 @@ private:
         T deltaMesh = (Lmax - Lmin) / (gridDim_);
         T centerCoord = deltaMesh / 2;
         T startingCoord = Lmin + centerCoord;
-
         T displacement = inbox_.low[0] / gridDim_;
+
+        #pragma omp parallel for
         for (int i = 0; i < inbox_.size[0]; i++)
         {
             x_[i] = (startingCoord + displacement) + deltaMesh * i;
         }
-
-        // displacement = inbox_.low[1] / gridDim_;
-        // for (int i = 0; i < inbox_.size[1]; i++)
-        // {
-        //     y_[i] = (startingCoord + displacement) + deltaMesh * i;
-        // }
-
-        // displacement = inbox_.low[2] / gridDim_;
-        // for (int i = 0; i < inbox_.size[2]; i++)
-        // {
-        //     z_[i] = (startingCoord + displacement) + deltaMesh * i;
-        // }
     }
 };
