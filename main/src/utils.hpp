@@ -2,6 +2,7 @@
 
 #include <tuple>
 #include <omp.h>
+#include <chrono>
 
 auto initMpi()
 {
@@ -29,3 +30,33 @@ int exitSuccess()
     MPI_Finalize();
     return EXIT_SUCCESS;
 }
+
+class Timer
+{
+    typedef std::chrono::high_resolution_clock Clock;
+    typedef std::chrono::duration<float>       Time;
+
+public:
+    Timer(std::ostream& out)
+        : out(out)
+    {
+    }
+
+    void start()
+    {
+        tstart = tlast = Clock::now();
+    }
+
+    //! @brief time elapsed between tstart and now
+    void elapsed(const std::string func) 
+    {
+        tlast = Clock::now();
+        out << func << " elapsed time: " << std::chrono::duration_cast<Time>(tlast - tstart).count() << std::endl;
+        tstart = tlast;
+    }
+
+
+private:
+    std::ostream&                  out;
+    std::chrono::time_point<Clock> tstart, tlast;
+};

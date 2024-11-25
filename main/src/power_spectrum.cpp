@@ -1,4 +1,5 @@
 #include <algorithm>
+
 #include "mesh.hpp"
 #include "utils.hpp"
 #include "arg_parser.hpp"
@@ -31,6 +32,8 @@ int main(int argc, char** argv)
     float             meshSizeMultiplier = parser.get("--meshSizeMultiplier", 1.0);
     size_t            numShells          = parser.get("--numShells", 0);
 
+    Timer timer(std::cout);
+
     // read HDF5 checkpoint
     auto reader = makeH5PartReader(MPI_COMM_WORLD);
     reader->setStep(initFile, stepNo, FileMode::collective);
@@ -49,6 +52,8 @@ int main(int argc, char** argv)
     std::vector<double> scratch2(x.size());
     std::vector<double> scratch3(x.size());
 
+    timer.start();
+
     reader->readField("x", x.data());
     reader->readField("y", y.data());
     reader->readField("z", z.data());
@@ -57,6 +62,8 @@ int main(int argc, char** argv)
     reader->readField("vy", vy.data());
     reader->readField("vz", vz.data());
     reader->closeStep();
+
+    timer.elapsed("Checkpoint read");
 
     std::cout << "Read " << reader->localNumParticles() << " particles on rank " << rank << std::endl;
 
@@ -84,12 +91,21 @@ int main(int argc, char** argv)
     std::cout << "rank = " << rank << " keys size after sync = " << keys.size() << std::endl;
     // std::cout << "rank = " << rank << " keys.begin = " << *keys.begin() << " keys.end = " << *keys.end() << std::endl;
 
+    scratch1.clear();
+    scratch2.clear();
+    scratch3.clear();
+
+    timer.elapsed("Sync");
+
     mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
+
 
     // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
     std::cout << "rasterized" << std::endl;
+    timer.elapsed("Rasterization");
     // calculate power spectrum
     mesh.calculate_power_spectrum();
+    timer.elapsed("Power Spectrum");
 
     // write power spectrum to HDF5?
     if (rank == 0)
