@@ -16,10 +16,9 @@ option(BUILD_TESTING "build unit and integration tests" ON)
 option(GPU_DIRECT "Enable CUDA-aware MPI communication" OFF)
 
 set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
-cmake_policy(SET CMP0144 NEW)
-find_package(Heffte PATHS HEFFTE_PATH)
-# set(FFTW_PATH "$ENV{HOME}/lib_installed/fftw" CACHE PATH "Path to FFTW installation")
+find_package(Heffte REQUIRED PATHS ${HEFFTE_PATH})
 
+# set(FFTW_PATH "$ENV{HOME}/lib_installed/fftw" CACHE PATH "Path to FFTW installation")
 set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/cstone/include)
 set(CSTONE_TEST_DIR ${PROJECT_SOURCE_DIR}/cstone/test)
 

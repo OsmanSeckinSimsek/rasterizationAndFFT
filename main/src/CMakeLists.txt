@@ -5,8 +5,7 @@ function(enableGpuDirect exename)
 endfunction()
 
 # find_package(Heffte PATHS $(HEFFTE_PATH))
-set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
-
+# set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
 set(exename power_spectrum)
 add_executable(${exename} power_spectrum.cpp)
 message(HEFFTE_INC_DIR="${HEFFTE_PATH}/include")
