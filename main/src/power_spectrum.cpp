@@ -22,7 +22,7 @@ int main(int argc, char** argv)
         return exitSuccess();
     }
 
-    using KeyType = uint64_t;
+    using KeyType        = uint64_t;
     using CoordinateType = double;
 
     using Domain = cstone::Domain<KeyType, CoordinateType, cstone::CpuTag>;
@@ -68,9 +68,9 @@ int main(int argc, char** argv)
     std::cout << "Read " << reader->localNumParticles() << " particles on rank " << rank << std::endl;
 
     // get the dimensions from the checkpoint
-    int powerDim = std::ceil(std::log(simDim)/std::log(2));
-    int gridDim = std::pow(2, powerDim);               // dimension of the mesh
-    if (numShells == 0) numShells = gridDim/2; // default number of shells is half of the mesh dimension
+    int powerDim = std::ceil(std::log(simDim) / std::log(2));
+    int gridDim  = simDim;                       // std::pow(2, powerDim);               // dimension of the mesh
+    if (numShells == 0) numShells = gridDim / 2; // default number of shells is half of the mesh dimension
 
     // init mesh, sim box -0.5 to 0.5 by default
     Mesh<MeshType> mesh(rank, numRanks, gridDim, numShells);
@@ -87,9 +87,11 @@ int main(int argc, char** argv)
 
     domain.sync(keys, x, y, z, h, std::tie(vx, vy, vz), std::tie(scratch1, scratch2, scratch3));
     std::cout << "rank = " << rank << " numLocalParticles after sync = " << domain.nParticles() << std::endl;
-    std::cout << "rank = " << rank << " numLocalParticleswithHalos after sync = " << domain.nParticlesWithHalos() << std::endl;
+    std::cout << "rank = " << rank << " numLocalParticleswithHalos after sync = " << domain.nParticlesWithHalos()
+              << std::endl;
     std::cout << "rank = " << rank << " keys size after sync = " << keys.size() << std::endl;
-    // std::cout << "rank = " << rank << " keys.begin = " << *keys.begin() << " keys.end = " << *keys.end() << std::endl;
+    // std::cout << "rank = " << rank << " keys.begin = " << *keys.begin() << " keys.end = " << *keys.end() <<
+    // std::endl;
 
     scratch1.clear();
     scratch2.clear();
@@ -98,7 +100,6 @@ int main(int argc, char** argv)
     timer.elapsed("Sync");
 
     mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
-
 
     // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
     std::cout << "rasterized" << std::endl;

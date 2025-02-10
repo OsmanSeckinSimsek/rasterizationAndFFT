@@ -1,5 +1,6 @@
 #include <vector>
 #include <limits>
+#include <numbers>
 #include "heffte.h"
 #include "cstone/domain/domain.hpp"
 
@@ -9,42 +10,42 @@ struct DataSender
 {
     // vectors to send to each rank in all_to_allv
     std::vector<uint64_t> send_index;
-    std::vector<double> send_distance;
-    std::vector<double> send_vx;
-    std::vector<double> send_vy;
-    std::vector<double> send_vz;
+    std::vector<double>   send_distance;
+    std::vector<double>   send_vx;
+    std::vector<double>   send_vy;
+    std::vector<double>   send_vz;
 };
 
 template<typename T>
 class Mesh
 {
 public:
-    int rank_;
-    int numRanks_;
-    int gridDim_; // specifically integer because heffte library uses int
-    int numShells_;
-    T Lmin_;
-    T Lmax_;
+    int                rank_;
+    int                numRanks_;
+    int                gridDim_; // specifically integer because heffte library uses int
+    int                numShells_;
+    T                  Lmin_;
+    T                  Lmax_;
     std::array<int, 3> proc_grid_;
 
     heffte::box3d<> inbox_;
     // coordinate centers in the mesh
-    std::vector<T>  x_;
+    std::vector<T> x_;
     // std::vector<T>  y_;
     // std::vector<T>  z_;
     // corresponding velocities in the mesh
-    std::vector<T>  velX_;
-    std::vector<T>  velY_;
-    std::vector<T>  velZ_;
+    std::vector<T> velX_;
+    std::vector<T> velY_;
+    std::vector<T> velZ_;
     // particle's distance to mesh point
-    std::vector<T>  distance_;
-    std::vector<T>  power_spectrum_;
+    std::vector<T> distance_;
+    std::vector<T> power_spectrum_;
 
-    //communication counters
-    std::vector<int> send_disp; //(numRanks_+1, 0);
+    // communication counters
+    std::vector<int> send_disp;  //(numRanks_+1, 0);
     std::vector<int> send_count; //(numRanks_, 0);
 
-    std::vector<int> recv_disp; //(numRanks_+1, 0);
+    std::vector<int> recv_disp;  //(numRanks_+1, 0);
     std::vector<int> recv_count; //(numRanks_, 0);
 
     std::vector<DataSender> vdataSender;
@@ -74,10 +75,12 @@ public:
         , inbox_(initInbox())
     {
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
-                           static_cast<uint64_t>(inbox_.size[2]);
+                             static_cast<uint64_t>(inbox_.size[2]);
         std::cout << "rank = " << rank << " griddim = " << gridDim << " inboxSize = " << inboxSize << std::endl;
-        std::cout << "rank = " << rank << " inbox low = " << inbox_.low[0] << " " << inbox_.low[1] << " " << inbox_.low[2] << std::endl;
-        std::cout << "rank = " << rank << " inbox high = " << inbox_.high[0] << " " << inbox_.high[1] << " " << inbox_.high[2] << std::endl;
+        std::cout << "rank = " << rank << " inbox low = " << inbox_.low[0] << " " << inbox_.low[1] << " "
+                  << inbox_.low[2] << std::endl;
+        std::cout << "rank = " << rank << " inbox high = " << inbox_.high[0] << " " << inbox_.high[1] << " "
+                  << inbox_.high[2] << std::endl;
         velX_.resize(inboxSize);
         velY_.resize(inboxSize);
         velZ_.resize(inboxSize);
@@ -94,33 +97,35 @@ public:
         setCoordinates(Lmin_, Lmax_);
     }
 
-    void rasterize_particles_to_mesh(std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
-                                     std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz, int powerDim)
+    void rasterize_particles_to_mesh(std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y, std::vector<T> z,
+                                     std::vector<T> vx, std::vector<T> vy, std::vector<T> vz, int powerDim)
     {
         std::cout << "rank" << rank_ << " rasterize start " << powerDim << std::endl;
         std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
-        
+
         int particleIndex = 0;
         // iterate over keys vector
         for (auto it = keys.begin(); it != keys.end(); ++it)
         {
-            auto crd = calculateKeyIndices(*it, powerDim);
-            int indexi = std::get<0>(crd);
-            int indexj = std::get<1>(crd);
-            int indexk = std::get<2>(crd);
-            
-            assert(indexi < std::pow(2, powerDim));
-            assert(indexj < std::pow(2, powerDim));
-            assert(indexk < std::pow(2, powerDim));
-            
-            double distance = calculateDistance(x[particleIndex], y[particleIndex], z[particleIndex], indexi, indexj, indexk);
-            assignVelocityByMeshCoord(indexi, indexj, indexk, distance, vx[particleIndex], vy[particleIndex], vz[particleIndex]);
+            auto crd    = calculateKeyIndices(*it, gridDim_);
+            int  indexi = std::get<0>(crd);
+            int  indexj = std::get<1>(crd);
+            int  indexk = std::get<2>(crd);
+
+            assert(indexi < gridDim_);
+            assert(indexj < gridDim_);
+            assert(indexk < gridDim_);
+
+            double distance =
+                calculateDistance(x[particleIndex], y[particleIndex], z[particleIndex], indexi, indexj, indexk);
+            assignVelocityByMeshCoord(indexi, indexj, indexk, distance, vx[particleIndex], vy[particleIndex],
+                                      vz[particleIndex]);
             particleIndex++;
         }
         x.clear();
         y.clear();
         z.clear();
-        
+
         std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
         for (int i = 0; i < numRanks_; i++)
             std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
@@ -145,11 +150,11 @@ public:
         {
             for (int j = send_disp[i]; j < send_disp[i + 1]; j++)
             {
-                send_index[j] = vdataSender[i].send_index[j - send_disp[i]];
+                send_index[j]    = vdataSender[i].send_index[j - send_disp[i]];
                 send_distance[j] = vdataSender[i].send_distance[j - send_disp[i]];
-                send_vx[j] = vdataSender[i].send_vx[j - send_disp[i]];
-                send_vy[j] = vdataSender[i].send_vy[j - send_disp[i]];
-                send_vz[j] = vdataSender[i].send_vz[j - send_disp[i]];
+                send_vx[j]       = vdataSender[i].send_vx[j - send_disp[i]];
+                send_vy[j]       = vdataSender[i].send_vy[j - send_disp[i]];
+                send_vz[j]       = vdataSender[i].send_vz[j - send_disp[i]];
             }
         }
         std::cout << "rank = " << rank_ << " buffers transformed" << std::endl;
@@ -160,27 +165,27 @@ public:
         recv_vx.resize(recv_disp[numRanks_]);
         recv_vy.resize(recv_disp[numRanks_]);
         recv_vz.resize(recv_disp[numRanks_]);
-        
-        MPI_Alltoallv(send_index.data(), send_count.data(), send_disp.data(), MpiType<uint64_t>{},
-                    recv_index.data(), recv_count.data(), recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
-        MPI_Alltoallv(send_distance.data(), send_count.data(), send_disp.data(), MpiType<T>{},
-                    recv_distance.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-        MPI_Alltoallv(send_vx.data(), send_count.data(), send_disp.data(), MpiType<T>{},
-                    recv_vx.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-        MPI_Alltoallv(send_vy.data(), send_count.data(), send_disp.data(), MpiType<T>{},
-                    recv_vy.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-        MPI_Alltoallv(send_vz.data(), send_count.data(), send_disp.data(), MpiType<T>{},
-                    recv_vz.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+        MPI_Alltoallv(send_index.data(), send_count.data(), send_disp.data(), MpiType<uint64_t>{}, recv_index.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_distance.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_distance.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_vx.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_vx.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_vy.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_vy.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_vz.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_vz.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
         std::cout << "rank = " << rank_ << " alltoallv done!" << std::endl;
-        
+
         for (int i = 0; i < recv_disp[numRanks_]; i++)
         {
             uint64_t index = recv_index[i];
             if (recv_distance[i] < distance_[index])
             {
-                velX_[index] = recv_vx[i];
-                velY_[index] = recv_vy[i];
-                velZ_[index] = recv_vz[i];
+                velX_[index]     = recv_vx[i];
+                velY_[index]     = recv_vy[i];
+                velZ_[index]     = recv_vz[i];
                 distance_[index] = recv_distance[i];
             }
         }
@@ -201,23 +206,23 @@ public:
 
     void assignVelocityByMeshCoord(int meshx, int meshy, int meshz, T distance, T velox, T veloy, T veloz)
     {
-        int targetRank = calculateRankFromMeshCoord(meshx, meshy, meshz);
+        int      targetRank  = calculateRankFromMeshCoord(meshx, meshy, meshz);
         uint64_t targetIndex = calculateInboxIndexFromMeshCoord(meshx, meshy, meshz);
-        
+
         if (targetRank == rank_)
         {
             // if the corresponding mesh cell belongs to this rank
             uint64_t index = targetIndex; // meshx + meshy * inbox_.size[0] + meshz * inbox_.size[0] * inbox_.size[1];
-            if(index >= velX_.size())
+            if (index >= velX_.size())
             {
                 std::cout << "rank = " << rank_ << " index = " << index << " size " << velX_.size() << std::endl;
             }
 
             if (distance < distance_[index])
             {
-                velX_[index] = velox;
-                velY_[index] = veloy;
-                velZ_[index] = veloz;
+                velX_[index]     = velox;
+                velY_[index]     = veloy;
+                velZ_[index]     = veloz;
                 distance_[index] = distance;
             }
         }
@@ -231,14 +236,13 @@ public:
             vdataSender[targetRank].send_vy.push_back(veloy);
             vdataSender[targetRank].send_vz.push_back(veloz);
         }
-        
     }
 
     void extrapolateEmptyCellsFromNeighbors()
     {
         std::cout << "rank = " << rank_ << " extrapolate cells" << std::endl;
 
-        #pragma omp parallel for collapse(3)
+#pragma omp parallel for collapse(3)
         for (int i = 0; i < inbox_.size[2]; i++)
         {
             for (int j = 0; j < inbox_.size[1]; j++)
@@ -248,23 +252,22 @@ public:
                     uint64_t index = k + j * inbox_.size[0] + i * inbox_.size[0] * inbox_.size[1];
                     if (distance_[index] == std::numeric_limits<T>::infinity())
                     {
-                        // iterate over the neighbors and average the velocities of the neighbors which have a distance assigned
-                        T velXSum = 0;
-                        T velYSum = 0;
-                        T velZSum = 0;
-                        int count = 0;
+                        // iterate over the neighbors and average the velocities of the neighbors which have a distance
+                        // assigned
+                        T   velXSum = 0;
+                        T   velYSum = 0;
+                        T   velZSum = 0;
+                        int count   = 0;
                         for (int ni = i - 1; ni <= i + 1; ni++)
                         {
-                            if (ni < 0 || ni >= inbox_.size[2])
-                            continue;
+                            if (ni < 0 || ni >= inbox_.size[2]) continue;
                             for (int nj = j - 1; nj <= j + 1; nj++)
                             {
-                                if (nj < 0 || nj >= inbox_.size[1])
-                                    continue;                                
+                                if (nj < 0 || nj >= inbox_.size[1]) continue;
                                 for (int nk = k - 1; nk <= k + 1; nk++)
                                 {
                                     if (nk < 0 || nk >= inbox_.size[0])
-                                    continue;
+                                        continue;
                                     else
                                     {
                                         uint64_t neighborIndex = (ni * inbox_.size[1] + nj) * inbox_.size[0] + nk;
@@ -280,7 +283,7 @@ public:
                                 }
                             }
                         }
-                        
+
                         if (count > 0)
                         {
                             velX_[index] = velXSum / count;
@@ -295,12 +298,13 @@ public:
 
     void calculate_power_spectrum()
     {
+        // returns the velocity field square
         calculate_fft();
 
         std::vector<T> freqVelo(velX_.size());
 
-        // calculate the modulus of the velocity frequencies
-        #pragma omp parallel for
+// calculate the modulus of the velocity frequencies
+#pragma omp parallel for
         for (uint64_t i = 0; i < velX_.size(); i++)
         {
             freqVelo[i] = velX_[i] + velY_[i] + velZ_[i];
@@ -308,16 +312,18 @@ public:
 
         // perform spherical averaging
         perform_spherical_averaging(freqVelo.data());
+        std::cout << "done." << std::endl;
     }
 
     void calculate_fft()
     {
         std::cout << "rank = " << rank_ << " fft calculation started." << std::endl;
         heffte::box3d<> outbox   = inbox_;
-        uint64_t          meshSize = gridDim_ * gridDim_ * gridDim_;
+        uint64_t        meshSize = 1;
+        meshSize                 = meshSize * gridDim_ * gridDim_ * gridDim_;
 
         heffte::plan_options options = heffte::default_options<heffte::backend::fftw>();
-        options.use_pencils = true;
+        options.use_pencils          = true;
 
         // change fftw depending on the configuration into cufft or rocmfft
         heffte::fft3d<heffte::backend::fftw> fft(inbox_, outbox, MPI_COMM_WORLD, options);
@@ -327,7 +333,7 @@ public:
         // divide the fft.forward results by the mesh size as the first step of normalization
         fft.forward(velX_.data(), output.data());
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (uint64_t i = 0; i < velX_.size(); i++)
         {
             T out    = abs(output.at(i)) / meshSize;
@@ -336,7 +342,7 @@ public:
 
         fft.forward(velY_.data(), output.data());
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (uint64_t i = 0; i < velY_.size(); i++)
         {
             T out    = abs(output.at(i)) / meshSize;
@@ -345,7 +351,7 @@ public:
 
         fft.forward(velZ_.data(), output.data());
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (uint64_t i = 0; i < velZ_.size(); i++)
         {
             T out    = abs(output.at(i)) / meshSize;
@@ -384,22 +390,22 @@ public:
     void perform_spherical_averaging(T* ps)
     {
         std::cout << "rank = " << rank_ << " spherical averaging started." << std::endl;
-        std::vector<T> k_values(gridDim_);
-        std::vector<T> k_1d(gridDim_);
-        std::vector<T> ps_rad(numShells_);
+        std::vector<T>   k_values(gridDim_);
+        std::vector<T>   k_1d(gridDim_);
+        std::vector<T>   ps_rad(numShells_);
         std::vector<int> count(k_1d.size());
         std::vector<int> counts(k_1d.size(), 0);
 
         fftfreq(k_values, gridDim_, 1.0 / gridDim_);
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (int i = 0; i < gridDim_; i++)
         {
             k_1d[i] = std::abs(k_values[i]);
         }
 
-        // iterate over the ps array and assign the values to the correct radial bin
-        #pragma omp parallel for collapse(3)
+// iterate over the ps array and assign the values to the correct radial bin
+#pragma omp parallel for collapse(3)
         for (int i = 0; i < inbox_.size[2]; i++) // slow heffte order
         {
             for (int j = 0; j < inbox_.size[1]; j++) // mid heffte order
@@ -409,24 +415,24 @@ public:
                     uint64_t freq_index = k + j * inbox_.size[0] + i * inbox_.size[0] * inbox_.size[1];
 
                     // Calculate the k indices with respect to the global mesh
-                    uint64_t k_index_i = i + inbox_.low[2];
-                    uint64_t k_index_j = j + inbox_.low[1];
-                    uint64_t k_index_k = k + inbox_.low[0];
-                    T      kdist     = std::sqrt(k_values[k_index_i] * k_values[k_index_i] +
-                                    k_values[k_index_j] * k_values[k_index_j] +
-                                    k_values[k_index_k] * k_values[k_index_k]);
+                    uint64_t       k_index_i = i + inbox_.low[2];
+                    uint64_t       k_index_j = j + inbox_.low[1];
+                    uint64_t       k_index_k = k + inbox_.low[0];
+                    T              kdist     = std::sqrt(k_values[k_index_i] * k_values[k_index_i] +
+                                                         k_values[k_index_j] * k_values[k_index_j] +
+                                                         k_values[k_index_k] * k_values[k_index_k]);
                     std::vector<T> k_dif(gridDim_);
 
                     for (int kind = 0; kind < gridDim_; kind++)
                     {
                         k_dif[kind] = std::abs(k_1d[kind] - kdist);
                     }
-                    auto   it      = std::min_element(std::begin(k_dif), std::end(k_dif));
+                    auto     it      = std::min_element(std::begin(k_dif), std::end(k_dif));
                     uint64_t k_index = std::distance(std::begin(k_dif), it);
 
-                    #pragma omp atomic
+#pragma omp atomic
                     ps_rad[k_index] += ps[freq_index];
-                    #pragma omp atomic
+#pragma omp atomic
                     count[k_index]++;
                 }
             }
@@ -442,11 +448,12 @@ public:
 
             std::cout << "sum_ps_radial: " << sum_ps_radial << std::endl;
 
-            #pragma omp parallel for
+#pragma omp parallel for
             for (int i = 0; i < numShells_; i++)
             {
                 if (count[i] != 0)
-                    power_spectrum_[i] = (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i],2) )/ counts[i];
+                    power_spectrum_[i] =
+                        (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i], 2)) / counts[i];
             }
         }
     }
@@ -497,16 +504,18 @@ public:
         return index;
     }
 
-    std::tuple<int,int,int> calculateKeyIndices(KeyType key, int powerDim)
+    std::tuple<int, int, int> calculateKeyIndices(KeyType key, int gridDim)
     {
         auto mesh_indices = cstone::decodeHilbert(key);
-        unsigned divisor = std::pow(2, (21-powerDim));
+        // unsigned divisor      = std::pow(2, (21 - powerDim));
+        unsigned divisor = 1 + std::pow(2, 21) / gridDim;
 
-        int meshCoordX_base = std::get<0>(mesh_indices)/divisor;
-        int meshCoordY_base = std::get<1>(mesh_indices)/divisor;
-        int meshCoordZ_base = std::get<2>(mesh_indices)/divisor;
+        int meshCoordX_base = std::get<0>(mesh_indices) / divisor;
+        int meshCoordY_base = std::get<1>(mesh_indices) / divisor;
+        int meshCoordZ_base = std::get<2>(mesh_indices) / divisor;
 
-        // std::cout << "key: " << key << " mesh indices: " << meshCoordX_base << " " << meshCoordY_base << " " << meshCoordZ_base << std::endl;
+        // std::cout << "key: " << key << " mesh indices: " << meshCoordX_base << " " << meshCoordY_base << " " <<
+        // meshCoordZ_base << std::endl;
         return std::tie(meshCoordX_base, meshCoordY_base, meshCoordZ_base);
     }
 
@@ -517,7 +526,8 @@ private:
 
         proc_grid_ = heffte::proc_setup_min_surface(all_indexes, numRanks_);
         // print proc_grid
-        std::cout << "rank = " << rank_ << " proc_grid: " << proc_grid_[0] << " " << proc_grid_[1] << " " << proc_grid_[2] << std::endl;
+        std::cout << "rank = " << rank_ << " proc_grid: " << proc_grid_[0] << " " << proc_grid_[1] << " "
+                  << proc_grid_[2] << std::endl;
 
         // split all indexes across the processor grid, defines a set of boxes
         std::vector<heffte::box3d<>> all_boxes = heffte::split_world(all_indexes, proc_grid_);
@@ -528,12 +538,12 @@ private:
     // Calculates the volume centers instead of starting with Lmin and adding deltaMesh
     void setCoordinates(T Lmin, T Lmax)
     {
-        T deltaMesh = (Lmax - Lmin) / (gridDim_);
-        T centerCoord = deltaMesh / 2;
+        T deltaMesh     = (Lmax - Lmin) / (gridDim_);
+        T centerCoord   = deltaMesh / 2;
         T startingCoord = Lmin + centerCoord;
-        T displacement = inbox_.low[0] / gridDim_;
+        T displacement  = inbox_.low[0] / gridDim_;
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (int i = 0; i < inbox_.size[0]; i++)
         {
             x_[i] = (startingCoord + displacement) + deltaMesh * i;
