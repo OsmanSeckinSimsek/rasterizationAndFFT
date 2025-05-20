@@ -23,7 +23,7 @@ set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/cstone/include)
 set(CSTONE_TEST_DIR ${PROJECT_SOURCE_DIR}/cstone/test)
 
 find_package(MPI)
-find_package(OpenMP)
+find_package(OpenMP REQUIRED)
 
 # if INTERFACE_LINK_OPTIONS for OpenMP_CXX is not set, we set
 # INTERFACE_LINK_OPTIONS = INTERFACE_COMPILE_OPTIONS
