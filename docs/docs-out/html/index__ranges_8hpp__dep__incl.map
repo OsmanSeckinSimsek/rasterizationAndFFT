@@ -1,0 +1,46 @@
+<map id="index_ranges.hpp" name="index_ranges.hpp">
+<area shape="rect" id="Node000001" title="Utility class to express ranges of indices." alt="" coords="386,5,523,31"/>
+<area shape="rect" id="Node000002" href="$buffer__description_8hpp.html" title="Buffer description and management for domain decomposition particle exchanges." alt="" coords="188,79,355,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="413,38,303,81,301,76,411,33"/>
+<area shape="rect" id="Node000010" href="$halos_8hpp.html" title="Implementation of halo discovery and halo exchange." alt="" coords="62,225,148,251"/>
+<area shape="poly" id="edge25_Node000001_Node000010" title=" " alt="" coords="372,34,272,52,163,78,112,95,68,112,34,132,13,153,9,164,9,174,23,193,48,210,75,223,73,228,45,214,20,197,4,176,3,163,8,151,31,128,66,108,110,89,161,73,271,47,371,29"/>
+<area shape="rect" id="Node000011" href="$domaindecomp_8hpp.html" title="Functions to assign a global cornerstone octree to different ranks." alt="" coords="379,79,530,104"/>
+<area shape="poly" id="edge12_Node000001_Node000011" title=" " alt="" coords="457,44,457,79,452,79,452,44"/>
+<area shape="rect" id="Node000016" href="$exchange__focus_8hpp.html" title="Request counts for a locally present node structure of a remote domain from a remote rank." alt="" coords="554,79,709,104"/>
+<area shape="poly" id="edge23_Node000001_Node000016" title=" " alt="" coords="497,33,604,76,602,81,495,38"/>
+<area shape="rect" id="Node000017" href="$octree__focus_8hpp.html" title="Generation of locally essential global octrees in cornerstone format." alt="" coords="733,79,866,104"/>
+<area shape="poly" id="edge26_Node000001_Node000017" title=" " alt="" coords="524,31,744,76,743,81,523,36"/>
+<area shape="rect" id="Node000003" href="$domaindecomp__mpi_8hpp.html" title="Exchange particles between different ranks to satisfy their assignments of the global octree." alt="" coords="202,152,384,177"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="282,117,292,151,287,153,277,118"/>
+<area shape="rect" id="Node000009" href="$exchange__halos_8hpp.html" title="Halo particle exchange with MPI point&#45;to&#45;point communication." alt="" coords="22,152,177,177"/>
+<area shape="poly" id="edge9_Node000002_Node000009" title=" " alt="" coords="233,112,129,154,127,149,231,107"/>
+<area shape="rect" id="Node000004" href="$assignment_8hpp.html" title="Implementation of global particle assignment and distribution." alt="" coords="178,225,304,251"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="279,190,252,227,247,224,275,187"/>
+<area shape="rect" id="Node000005" href="$domain_8hpp.html" title="A domain class to manage distributed particles and their halos." alt="" coords="410,299,509,324"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="290,252,425,296,424,301,289,257"/>
+<area shape="rect" id="Node000006" href="$domain__minimal_8cpp.html" title=" " alt="" coords="263,372,422,397"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="431,333,363,374,360,369,428,329"/>
+<area shape="rect" id="Node000007" href="$mesh_8hpp.html" title=" " alt="" coords="498,372,584,397"/>
+<area shape="poly" id="edge6_Node000005_Node000007" title=" " alt="" coords="485,331,530,370,526,374,481,335"/>
+<area shape="rect" id="Node000008" href="$power__spectrum_8cpp.html" title=" " alt="" coords="421,445,578,471"/>
+<area shape="poly" id="edge8_Node000005_Node000008" title=" " alt="" coords="469,337,499,444,494,446,464,338"/>
+<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="530,411,509,447,504,444,525,408"/>
+<area shape="poly" id="edge10_Node000009_Node000010" title=" " alt="" coords="104,191,107,225,102,225,99,191"/>
+<area shape="poly" id="edge11_Node000010_Node000005" title=" " alt="" coords="162,248,411,297,410,303,161,253"/>
+<area shape="rect" id="Node000012" href="$layout_8hpp.html" title="Utility functions for determining the layout of particle buffers on a given rank." alt="" coords="409,152,500,177"/>
+<area shape="poly" id="edge13_Node000011_Node000012" title=" " alt="" coords="457,118,457,152,452,152,452,118"/>
+<area shape="rect" id="Node000015" href="$peers_8hpp.html" title="Functions for finding peer ranks for point to point communication in global domains." alt="" coords="524,152,611,177"/>
+<area shape="poly" id="edge21_Node000011_Node000015" title=" " alt="" coords="486,109,551,150,548,154,483,114"/>
+<area shape="poly" id="edge14_Node000012_Node000004" title=" " alt="" coords="408,184,277,228,275,223,407,179"/>
+<area shape="poly" id="edge15_Node000012_Node000005" title=" " alt="" coords="474,187,493,225,495,246,489,267,471,299,467,297,484,265,489,245,488,226,470,190"/>
+<area shape="poly" id="edge18_Node000012_Node000010" title=" " alt="" coords="396,181,149,231,148,225,395,175"/>
+<area shape="rect" id="Node000013" href="$exchange__keys_8hpp.html" title="Send/receive SFC key ranges to let peer ranks know which particles to send as halos." alt="" coords="328,225,479,251"/>
+<area shape="poly" id="edge16_Node000012_Node000013" title=" " alt="" coords="440,190,414,227,410,224,436,187"/>
+<area shape="rect" id="Node000014" href="$octree__focus__mpi_8hpp.html" title="Traits and functors for the MPI&#45;enabled FocusedOctree." alt="" coords="605,225,770,251"/>
+<area shape="poly" id="edge19_Node000012_Node000014" title=" " alt="" coords="506,179,651,223,649,228,504,184"/>
+<area shape="poly" id="edge17_Node000013_Node000005" title=" " alt="" coords="424,260,453,297,449,300,420,263"/>
+<area shape="poly" id="edge20_Node000014_Node000005" title=" " alt="" coords="639,257,498,301,496,296,637,252"/>
+<area shape="poly" id="edge22_Node000015_Node000005" title=" " alt="" coords="555,191,513,252,472,300,468,297,508,249,551,188"/>
+<area shape="poly" id="edge24_Node000016_Node000014" title=" " alt="" coords="644,116,686,224,681,226,639,118"/>
+<area shape="poly" id="edge27_Node000017_Node000014" title=" " alt="" coords="785,117,699,227,695,223,780,113"/>
+</map>

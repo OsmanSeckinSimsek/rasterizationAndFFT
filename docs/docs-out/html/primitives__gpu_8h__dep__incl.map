@@ -1,0 +1,20 @@
+<map id="primitives_gpu.h" name="primitives_gpu.h">
+<area shape="rect" id="Node000001" title="Basic algorithms on the GPU." alt="" coords="195,5,326,31"/>
+<area shape="rect" id="Node000002" href="$halos_8hpp.html" title="Implementation of halo discovery and halo exchange." alt="" coords="114,152,199,177"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="229,40,205,58,184,80,167,118,160,152,155,151,162,117,180,77,201,54,225,36"/>
+<area shape="rect" id="Node000007" href="$octree__focus_8hpp.html" title="Generation of locally essential global octrees in cornerstone format." alt="" coords="194,79,327,104"/>
+<area shape="poly" id="edge7_Node000001_Node000007" title=" " alt="" coords="263,44,263,79,258,79,258,44"/>
+<area shape="rect" id="Node000008" href="$octree__focus__mpi_8hpp.html" title="Traits and functors for the MPI&#45;enabled FocusedOctree." alt="" coords="223,152,389,177"/>
+<area shape="poly" id="edge10_Node000001_Node000008" title=" " alt="" coords="300,35,323,53,342,78,346,98,341,119,319,153,315,150,336,117,340,98,337,80,319,57,296,40"/>
+<area shape="rect" id="Node000003" href="$domain_8hpp.html" title="A domain class to manage distributed particles and their halos." alt="" coords="182,225,281,251"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="180,185,221,223,217,227,177,189"/>
+<area shape="rect" id="Node000004" href="$domain__minimal_8cpp.html" title=" " alt="" coords="5,299,164,324"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="197,259,110,301,108,296,195,254"/>
+<area shape="rect" id="Node000005" href="$mesh_8hpp.html" title=" " alt="" coords="188,299,275,324"/>
+<area shape="poly" id="edge4_Node000003_Node000005" title=" " alt="" coords="234,264,234,299,229,299,229,264"/>
+<area shape="rect" id="Node000006" href="$power__spectrum_8cpp.html" title=" " alt="" coords="193,372,350,397"/>
+<area shape="poly" id="edge6_Node000003_Node000006" title=" " alt="" coords="259,258,276,276,288,298,292,318,291,339,280,373,274,371,285,338,287,318,284,300,272,279,255,262"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="247,335,267,371,263,373,242,338"/>
+<area shape="poly" id="edge8_Node000007_Node000008" title=" " alt="" coords="278,114,301,150,296,153,273,117"/>
+<area shape="poly" id="edge9_Node000008_Node000003" title=" " alt="" coords="286,189,245,227,242,223,282,185"/>
+</map>

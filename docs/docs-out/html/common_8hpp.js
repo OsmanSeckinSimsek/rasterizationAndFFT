@@ -1,0 +1,25 @@
+var common_8hpp =
+[
+    [ "commonPrefix", "common_8hpp.html#a78f509b9fb275cb8bf0d540681174822", null ],
+    [ "decodePlaceholderBit", "common_8hpp.html#aa03c2fc3addf2158300b5e1c17df3684", null ],
+    [ "decodePrefixLength", "common_8hpp.html#a4bb049aaa3103bdd79f42fb329a88639", null ],
+    [ "digitWeight", "common_8hpp.html#acb36224fc3057d03fb74b4c88739b632", null ],
+    [ "enclosingBoxCode", "common_8hpp.html#af86e6fc94838cadc77f9c359cafbf3ec", null ],
+    [ "encodePlaceholderBit", "common_8hpp.html#abe358bb531bd012cf6bd426cc6f236a4", null ],
+    [ "isAncestor", "common_8hpp.html#aa2e7a2cadb54fca11090363230c8e092", null ],
+    [ "isPowerOf8", "common_8hpp.html#acd74e2142c82f18659c4778f030a3e15", null ],
+    [ "lastNzPlace", "common_8hpp.html#ad6f987f0a7b7cb62e98a43012b94fa2f", null ],
+    [ "log8ceil", "common_8hpp.html#a366f08c027ae6bcd8afdbf873f2cd948", null ],
+    [ "makePrefix", "common_8hpp.html#a7692fb6ab797e4c497fc69b7f4afe52f", null ],
+    [ "nodeRange", "common_8hpp.html#ad2eb2287ba506a5fe544bf2627b4977b", null ],
+    [ "octalDigit", "common_8hpp.html#a1dcbc63abef4bbbac0fde10cbc77ea00", null ],
+    [ "octalPower", "common_8hpp.html#aeffea930222fd56e27345f02dd181544", null ],
+    [ "pad", "common_8hpp.html#a88e7cf1f2fbfdead5327f969077f8e96", null ],
+    [ "smallestCommonBox", "common_8hpp.html#a32c515535a3dc4da80b36efad0209c6f", null ],
+    [ "spanSfcRange", "common_8hpp.html#a07b2a553fd9770d6a014a8b6b3165730", null ],
+    [ "spanSfcRange", "common_8hpp.html#a441f5658d946885a1528d4ed214339f5", null ],
+    [ "toNBitInt", "common_8hpp.html#aafcbc01b2db139fd7f8c07503ea4555a", null ],
+    [ "toNBitIntCeil", "common_8hpp.html#abb204b9aa10b513f13fca2242eda85a9", null ],
+    [ "treeLevel", "common_8hpp.html#a3180e184261c7da178feb8f1cdd07c9f", null ],
+    [ "zeroLowBits", "common_8hpp.html#a491da2b745e89f2f955aa26504452bf0", null ]
+];

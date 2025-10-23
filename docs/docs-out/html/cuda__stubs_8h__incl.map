@@ -1,0 +1,7 @@
+<map id="cuda_stubs.h" name="cuda_stubs.h">
+<area shape="rect" id="Node000001" title="CUDA/Thrust stubs to provide declarations without definitions for use in non&#45;CUDA builds." alt="" coords="49,5,155,31"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,79,97,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,33,70,69,65,66,91,29"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="121,79,184,104"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="113,29,139,66,134,69,108,33"/>
+</map>

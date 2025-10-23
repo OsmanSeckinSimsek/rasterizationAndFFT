@@ -1,0 +1,9 @@
+<map id="mpi_wrappers.hpp" name="mpi_wrappers.hpp">
+<area shape="rect" id="Node000001" title="A few C++ wrappers for MPI C functions." alt="" coords="63,5,206,31"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,79,64,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="120,33,64,73,61,68,117,29"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="89,79,181,104"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="137,31,137,65,132,65,132,31"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="205,79,267,104"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="152,28,210,68,207,73,149,33"/>
+</map>

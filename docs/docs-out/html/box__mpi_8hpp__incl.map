@@ -1,0 +1,45 @@
+<map id="box_mpi.hpp" name="box_mpi.hpp">
+<area shape="rect" id="Node000001" title="compute global minima and maxima of array ranges" alt="" coords="305,5,412,31"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,167,64,192"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="305,24,235,30,157,40,88,57,62,68,45,80,35,97,31,115,32,153,26,153,25,115,30,94,41,77,59,63,86,52,156,35,235,25,305,19"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="624,86,709,111"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="411,28,606,76,618,80,617,85,605,81,409,33"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="1055,167,1124,192"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="413,27,486,46,563,76,578,87,588,98,598,108,613,116,674,138,726,150,774,155,820,156,915,154,971,156,1036,164,1042,165,1041,170,1036,169,971,161,915,159,820,161,774,160,725,155,672,143,611,121,595,112,584,101,575,91,560,81,484,51,412,32"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="277,313,339,339"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="359,31,340,118,319,240,312,300,307,299,313,240,335,117,353,30"/>
+<area shape="rect" id="Node000006" href="$mpi__wrappers_8hpp.html" title="A few C++ wrappers for MPI C functions." alt="" coords="55,79,219,119"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="327,33,204,77,202,72,326,28"/>
+<area shape="rect" id="Node000009" href="$box_8hpp.html" title="implements a bounding bounding box for floating point coordinates and integer indices" alt="" coords="475,86,549,111"/>
+<area shape="poly" id="edge9_Node000001_Node000009" title=" " alt="" coords="383,28,478,77,476,82,380,33"/>
+<area shape="poly" id="edge6_Node000006_Node000002" title=" " alt="" coords="114,121,62,160,59,156,111,117"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="117,313,209,339"/>
+<area shape="poly" id="edge7_Node000006_Node000007" title=" " alt="" coords="141,119,147,192,161,299,156,300,141,192,136,119"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="157,167,219,192"/>
+<area shape="poly" id="edge8_Node000006_Node000008" title=" " alt="" coords="152,117,175,154,171,156,147,120"/>
+<area shape="poly" id="edge10_Node000009_Node000004" title=" " alt="" coords="543,109,569,116,699,138,801,144,905,149,1036,164,1042,165,1041,170,1036,169,904,154,801,150,698,143,567,121,542,114"/>
+<area shape="poly" id="edge11_Node000009_Node000005" title=" " alt="" coords="491,114,457,134,415,163,372,199,336,241,321,271,314,301,309,299,316,269,331,239,368,195,411,158,454,129,488,109"/>
+<area shape="rect" id="Node000010" href="$annotation_8hpp.html" title="Defines macros for enabling device code compilation." alt="" coords="755,313,957,339"/>
+<area shape="poly" id="edge12_Node000009_Node000010" title=" " alt="" coords="536,109,557,116,598,122,650,125,774,125,837,127,894,133,943,145,978,165,998,188,1007,213,1006,239,993,267,966,294,932,311,929,307,963,290,988,264,1001,238,1002,214,993,191,974,169,941,150,894,138,836,133,774,130,650,130,597,128,555,121,534,114"/>
+<area shape="rect" id="Node000011" href="$stl_8hpp.html" title="Functionality that exist in std::, but cannot be used in device code." alt="" coords="346,240,529,265"/>
+<area shape="poly" id="edge13_Node000009_Node000011" title=" " alt="" coords="509,113,451,229,447,227,504,110"/>
+<area shape="rect" id="Node000012" href="$definitions_8h.html" title=" " alt="" coords="497,167,676,192"/>
+<area shape="poly" id="edge16_Node000009_Node000012" title=" " alt="" coords="525,110,568,155,564,159,521,113"/>
+<area shape="rect" id="Node000016" href="$tuple_8hpp.html" title="Wrapper around different types of tuples compatible with device code." alt="" coords="809,167,964,192"/>
+<area shape="poly" id="edge24_Node000009_Node000016" title=" " alt="" coords="545,109,569,116,687,142,796,162,795,167,686,148,567,121,543,114"/>
+<area shape="poly" id="edge14_Node000011_Node000007" title=" " alt="" coords="394,268,221,312,220,307,393,263"/>
+<area shape="poly" id="edge15_Node000011_Node000010" title=" " alt="" coords="505,263,776,308,775,314,504,268"/>
+<area shape="poly" id="edge18_Node000012_Node000010" title=" " alt="" coords="677,185,747,203,781,218,812,238,837,267,851,299,846,301,832,270,809,242,779,223,745,208,676,190"/>
+<area shape="poly" id="edge19_Node000012_Node000011" title=" " alt="" coords="564,194,475,236,473,232,562,190"/>
+<area shape="rect" id="Node000013" title=" " alt="" coords="553,240,620,265"/>
+<area shape="poly" id="edge17_Node000012_Node000013" title=" " alt="" coords="589,192,589,226,584,226,584,192"/>
+<area shape="rect" id="Node000014" href="$array_8hpp.html" title="implementation of a compile&#45;time size array that can be used on the host and device" alt="" coords="644,240,799,265"/>
+<area shape="poly" id="edge20_Node000012_Node000014" title=" " alt="" coords="610,190,688,231,686,236,607,194"/>
+<area shape="poly" id="edge21_Node000014_Node000005" title=" " alt="" coords="655,268,353,320,353,314,654,263"/>
+<area shape="poly" id="edge23_Node000014_Node000010" title=" " alt="" coords="744,263,823,304,821,309,742,268"/>
+<area shape="rect" id="Node000015" title=" " alt="" coords="670,313,730,339"/>
+<area shape="poly" id="edge22_Node000014_Node000015" title=" " alt="" coords="720,266,710,301,705,299,715,265"/>
+<area shape="poly" id="edge26_Node000016_Node000010" title=" " alt="" coords="887,193,864,301,859,300,882,192"/>
+<area shape="rect" id="Node000017" title=" " alt="" coords="925,240,979,265"/>
+<area shape="poly" id="edge25_Node000016_Node000017" title=" " alt="" coords="899,191,934,228,930,232,895,194"/>
+</map>
