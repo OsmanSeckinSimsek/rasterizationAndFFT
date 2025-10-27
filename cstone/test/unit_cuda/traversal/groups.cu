@@ -1,26 +1,10 @@
 /*
- * MIT License
+ * Cornerstone octree
  *
- * Copyright (c) 2021 CSCS, ETH Zurich
- *               2021 University of Basel
+ * Copyright (c) 2024 CSCS, ETH Zurich
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Please, refer to the LICENSE file in the root directory.
+ * SPDX-License-Identifier: MIT License
  */
 
 /*! @file
@@ -38,8 +22,10 @@
 #include <thrust/host_vector.h>
 #include <thrust/sequence.h>
 
-#include "cstone/cuda/cuda_utils.cuh"
-#include "cstone/traversal/groups.cuh"
+#include "cstone/cuda/thrust_util.cuh"
+#include "cstone/primitives/math.hpp"
+#include "cstone/traversal/groups_gpu.cuh"
+#include "cstone/traversal/groups_gpu.h"
 #include "cstone/tree/cs_util.hpp"
 
 using namespace cstone;
@@ -50,21 +36,13 @@ using SplitType             = util::array<GpuConfig::ThreadMask, nwt>;
 
 TEST(TargetGroups, t0)
 {
-    using T              = double;
-    LocalIndex numGroups = 4;
-    LocalIndex groupSize = 8;
-    LocalIndex first     = 4;
-    LocalIndex last      = 34;
+    LocalIndex groupSize = 8, first = 4, last = 34;
 
-    thrust::device_vector<LocalIndex> groups(numGroups + 1);
+    GroupData<GpuTag> groups;
+    computeFixedGroups(first, last, groupSize, groups);
 
-    groupTargets<T><<<iceil(last - first, 64), 64>>>(first, last, nullptr, nullptr, nullptr, nullptr, groupSize,
-                                                     rawPtr(groups), iceil(last - first, groupSize));
-
-    thrust::host_vector<LocalIndex> hgroups = groups;
-
-    thrust::host_vector<LocalIndex> ref = std::vector<LocalIndex>{4, 12, 20, 28, 34};
-
+    std::vector<LocalIndex> hgroups = toHost(groups.data);
+    std::vector<LocalIndex> ref{4, 12, 20, 28, 34};
     EXPECT_EQ(hgroups, ref);
 }
 
@@ -81,11 +59,14 @@ __global__ void findSplitTester(util::array<GpuConfig::ThreadMask, N>* splits)
     for (int k = 0; k < N; ++k)
     {
         T x    = T(laneIdx) + k * GpuConfig::warpSize;
-        pos[k] = Vec4<T>{x, x, x, T(0)};
+        pos[k] = Vec4<T>{x, x, x, T(N * GpuConfig::warpSize)};
     }
 
     // introduce a split at position 0
-    if (laneIdx == 0) { pos[0] = {-1, -1, -1, 0}; }
+    if (laneIdx == 0) { pos[0] = {-1, -1, -1, N * GpuConfig::warpSize}; }
+
+    // introduce a split at position 2 due to interaction radius
+    if (laneIdx == 2) { pos[0][3] = 0.99 * std::sqrt(3.); }
 
     // introduce a split at position 31
     if (laneIdx == 31)
@@ -121,8 +102,9 @@ TEST(TargetGroups, findSplits)
             splitBits |= split[k];
         }
 
-        EXPECT_EQ(splitBits.count(), 3);
+        EXPECT_EQ(splitBits.count(), 4);
         EXPECT_EQ(splitBits[0], 1);
+        EXPECT_EQ(splitBits[2], 1);
         EXPECT_EQ(splitBits[31], 1);
         EXPECT_EQ(splitBits[33], 1);
     }
@@ -141,7 +123,7 @@ TEST(TargetGroups, makeSplits)
             ret[1] = b;
             return ret;
         }
-        else { return SplitType{GpuConfig::ThreadMask(b << 32) + a}; } // NOLINT
+        else { return SplitType{(uint64_t(b) << 32) + a}; } // NOLINT
     };
 
     {
@@ -237,14 +219,19 @@ TEST(TargetGroups, groupVolumes)
     // nodeIdx                   0  1 |2  3  4  5  6   7  8  9 |10  11  12 13 14 15
     // fixed groups                |                 |                   |
     std::vector<unsigned> counts{4, 1, 8, 8, 8, 8, 31, 8, 8, 8, 16, 16, 16, 0, 0};
-    std::vector<LocalIndex> layout(counts.size() + 1);
-    std::exclusive_scan(counts.begin(), counts.end() + 1, layout.begin(), 0);
+    std::vector<LocalIndex> layout(counts.size() + 1, 0);
+    std::inclusive_scan(counts.begin(), counts.end(), layout.begin() + 1);
 
     // these coordinates do not lie in the leaf cells specified by layout, but this is irrelevant for this test case
     thrust::device_vector<T> x(last), y(last), z(last), h(last);
     thrust::sequence(x.begin(), x.end(), 0);
     thrust::sequence(y.begin(), y.end(), 0);
     thrust::sequence(z.begin(), z.end(), 0);
+    thrust::fill(h.begin(), h.end(), box.maxExtent());
+    // particle 6 in 2nd group get a smaller interaction radius, just enough to cause a split
+    h[first + groupSize + 6] = 0.99 * std::sqrt(3.) / 2;
+    // particle 7 in 2nd group's radius is just big enough not to cause a split
+    h[first + groupSize + 7] = 1.01 * std::sqrt(3.) / 2;
 
     // introduce a split by increasing distance between particles 5 and 6
     x[5] -= 0.01;
@@ -266,7 +253,7 @@ TEST(TargetGroups, groupVolumes)
             box, tolFactor, rawPtr(splitMasks), rawPtr(groupDiv), numGroups);
 
         thrust::host_vector<LocalIndex> h_groupDiv = groupDiv;
-        thrust::host_vector<LocalIndex> ref        = std::vector<LocalIndex>{2, 1};
+        thrust::host_vector<LocalIndex> ref        = std::vector<LocalIndex>{2, 2};
         EXPECT_EQ(h_groupDiv, ref);
     }
     {
@@ -281,17 +268,16 @@ TEST(TargetGroups, groupVolumes)
     }
 
     {
-        thrust::device_vector<SplitType> S;
-        thrust::device_vector<LocalIndex> temp, groups;
+        // Fixed size groups (4,68,128) get split into (4,6,68,75,128)
+        //                            because of distance ^    ^ because of interaction radius
+        DeviceVector<LocalIndex> temp, groups;
 
         float tolFactor = std::sqrt(3.0) / distCrit * 1.01;
-        computeGroupSplits<groupSize>(first, last, rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(h), rawPtr(d_leaves),
-                                      nNodes(leaves), rawPtr(d_layout), box, tolFactor, S, temp, groups);
+        computeGroupSplits(first, last, rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(h), rawPtr(d_leaves), nNodes(leaves),
+                           rawPtr(d_layout), box, groupSize, tolFactor, temp, groups);
 
-        EXPECT_EQ(groups.size(), 4);
-        EXPECT_EQ(groups[0], 4);
-        EXPECT_EQ(groups[1], 6);
-        EXPECT_EQ(groups[2], 68);
-        EXPECT_EQ(groups[3], 128);
+        std::vector<LocalIndex> h_groups = toHost(groups);
+        std::vector<LocalIndex> ref{4, 6, 68, 75, 128};
+        EXPECT_EQ(h_groups, ref);
     }
 }

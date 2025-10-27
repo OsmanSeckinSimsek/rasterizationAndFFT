@@ -1,26 +1,10 @@
 /*
- * MIT License
+ * Cornerstone octree
  *
- * Copyright (c) 2021 CSCS, ETH Zurich
- *               2021 University of Basel
+ * Copyright (c) 2024 CSCS, ETH Zurich
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Please, refer to the LICENSE file in the root directory.
+ * SPDX-License-Identifier: MIT License
  */
 
 /*! @file
@@ -35,6 +19,7 @@
 #include <thrust/fill.h>
 
 #include "cstone/primitives/math.hpp"
+#include "cstone/primitives/primitives_gpu.h"
 #include "cstone/sfc/common.hpp"
 #include "cstone/tree/octree_gpu.h"
 
@@ -150,7 +135,11 @@ invertOrder(TreeNodeIndex* order, TreeNodeIndex* inverseOrder, TreeNodeIndex num
 }
 
 template<class KeyType>
-void buildOctreeGpu(const KeyType* cstoneTree, OctreeView<KeyType> d)
+void buildOctreeGpu(const KeyType* cstoneTree,
+                    OctreeView<KeyType> d,
+                    std::span<KeyType> keyBuf,
+                    std::span<TreeNodeIndex> valueBuf,
+                    std::span<char> cubTmp)
 {
     constexpr unsigned numThreads = 256;
 
@@ -158,18 +147,154 @@ void buildOctreeGpu(const KeyType* cstoneTree, OctreeView<KeyType> d)
     createUnsortedLayout<<<iceil(numNodes, numThreads), numThreads>>>(cstoneTree, d.numInternalNodes, d.numLeafNodes,
                                                                       d.prefixes, d.internalToLeaf);
 
-    thrust::sort_by_key(thrust::device, d.prefixes, d.prefixes + numNodes, d.internalToLeaf);
+    assert(keyBuf.size() == d.numNodes && valueBuf.size() == d.numNodes);
+    sortByKeyGpu(d.prefixes, d.prefixes + numNodes, d.internalToLeaf, keyBuf.data(), valueBuf.data(), cubTmp.data(),
+                 cubTmp.size());
 
     invertOrder<<<iceil(numNodes, numThreads), numThreads>>>(d.internalToLeaf, d.leafToInternal, numNodes,
                                                              d.numInternalNodes);
-    getLevelRange<<<maxTreeLevel<KeyType>{} + 2, 1>>>(d.prefixes, numNodes, d.levelRange);
+    getLevelRange<<<maxTreeLevel<KeyType>{} + 2, 1>>>(d.prefixes, numNodes, d.d_levelRange);
+    memcpyD2H(d.d_levelRange, maxTreeLevel<KeyType>{} + 2, d.levelRange);
 
     thrust::fill(thrust::device, d.childOffsets, d.childOffsets + numNodes, 0);
-    linkTree<<<iceil(d.numInternalNodes, numThreads), numThreads>>>(d.prefixes, d.numInternalNodes, d.leafToInternal,
-                                                                    d.levelRange, d.childOffsets, d.parents);
+    if (d.numInternalNodes)
+    {
+        linkTree<<<iceil(d.numInternalNodes, numThreads), numThreads>>>(
+            d.prefixes, d.numInternalNodes, d.leafToInternal, d.d_levelRange, d.childOffsets, d.parents);
+    }
+}
+
+template void
+buildOctreeGpu(const uint32_t*, OctreeView<uint32_t>, std::span<uint32_t>, std::span<TreeNodeIndex>, std::span<char>);
+template void
+buildOctreeGpu(const uint64_t*, OctreeView<uint64_t>, std::span<uint64_t>, std::span<TreeNodeIndex>, std::span<char>);
+
+template<class KeyType>
+void buildOctreeGpu(const KeyType* cstoneTree, OctreeView<KeyType> d)
+{
+    KeyType* keyBuf;
+    TreeNodeIndex* valueBuf;
+    char* cubTmp;
+    uint64_t tmpStorage = sortByKeyTempStorage<KeyType, TreeNodeIndex>(d.numNodes);
+    checkGpuErrors(cudaMalloc(&keyBuf, sizeof(KeyType) * d.numNodes));
+    checkGpuErrors(cudaMalloc(&valueBuf, sizeof(TreeNodeIndex) * d.numNodes));
+    checkGpuErrors(cudaMalloc(&cubTmp, tmpStorage));
+
+    buildOctreeGpu(cstoneTree, d, {keyBuf, size_t(d.numNodes)}, {valueBuf, size_t(d.numNodes)}, {cubTmp, tmpStorage});
+
+    checkGpuErrors(cudaFree(keyBuf));
+    checkGpuErrors(cudaFree(valueBuf));
+    checkGpuErrors(cudaFree(cubTmp));
 }
 
 template void buildOctreeGpu(const uint32_t*, OctreeView<uint32_t>);
 template void buildOctreeGpu(const uint64_t*, OctreeView<uint64_t>);
+
+__global__ void upsweepSumKernel(TreeNodeIndex firstCell,
+                                 TreeNodeIndex lastCell,
+                                 const TreeNodeIndex* childOffsets,
+                                 LocalIndex* nodeCounts)
+{
+    const int cellIdx = blockIdx.x * blockDim.x + threadIdx.x + firstCell;
+    if (cellIdx >= lastCell) return;
+
+    TreeNodeIndex firstChild = childOffsets[cellIdx];
+
+    if (firstChild) { nodeCounts[cellIdx] = NodeCount<LocalIndex>{}(cellIdx, firstChild, nodeCounts); }
+}
+
+void upsweepSumGpu(int numLevels,
+                   const TreeNodeIndex* levelRange,
+                   const TreeNodeIndex* childOffsets,
+                   LocalIndex* nodeCounts)
+{
+    constexpr int numThreads = 128;
+
+    for (int level = numLevels - 1; level >= 0; level--)
+    {
+        int numCellsLevel = levelRange[level + 1] - levelRange[level];
+        int numBlocks     = (numCellsLevel - 1) / numThreads + 1;
+        if (numCellsLevel)
+        {
+            upsweepSumKernel<<<numBlocks, numThreads>>>(levelRange[level], levelRange[level + 1], childOffsets,
+                                                        nodeCounts);
+        }
+    }
+}
+
+template<class KeyType>
+__global__ void locateNodesKernel(const KeyType* k1,
+                                  const KeyType* k2,
+                                  const KeyType* nodeKeys,
+                                  const TreeNodeIndex* lvlRange,
+                                  TreeNodeIndex* indices)
+{
+    LocalIndex tid  = blockIdx.x * blockDim.x + threadIdx.x;
+    TreeNodeIndex n = k2 - k1 - 1;
+    if (tid < n) { indices[tid] = locateNode(k1[tid], k1[tid + 1], nodeKeys, lvlRange); }
+}
+
+template<class KeyType>
+void locateNodesGpu(const KeyType* k1,
+                    const KeyType* k2,
+                    const KeyType* nodeKeys,
+                    const TreeNodeIndex* lvlRange,
+                    TreeNodeIndex* indices)
+{
+    int numThreads = 256;
+    int numBlocks  = iceil(k2 - k1 - 1, numThreads);
+    if (numBlocks == 0) { return; }
+    locateNodesKernel<<<numBlocks, numThreads>>>(k1, k2, nodeKeys, lvlRange, indices);
+}
+
+template void locateNodesGpu(const uint32_t* k1,
+                             const uint32_t* k2,
+                             const uint32_t* nodeKeys,
+                             const TreeNodeIndex* lvlRange,
+                             TreeNodeIndex* indices);
+template void locateNodesGpu(const uint64_t* k1,
+                             const uint64_t* k2,
+                             const uint64_t* nodeKeys,
+                             const TreeNodeIndex* lvlRange,
+                             TreeNodeIndex* indices);
+
+template<class KeyType>
+__global__ void locateNodesKernel(const KeyType* k1,
+                                  const TreeNodeIndex* map,
+                                  size_t n,
+                                  const KeyType* nodeKeys,
+                                  const TreeNodeIndex* lvlRange,
+                                  TreeNodeIndex* indices)
+{
+    LocalIndex tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) { indices[tid] = locateNode(k1[map[tid]], nodeKeys, lvlRange); }
+}
+
+template<class KeyType>
+void locateNodesGpu(const KeyType* k1,
+                    const TreeNodeIndex* map,
+                    size_t n,
+                    const KeyType* nodeKeys,
+                    const TreeNodeIndex* lvlRange,
+                    TreeNodeIndex* indices)
+{
+    int numThreads = 256;
+    int numBlocks  = iceil(n, numThreads);
+    if (numBlocks == 0) { return; }
+    locateNodesKernel<<<numBlocks, numThreads>>>(k1, map, n, nodeKeys, lvlRange, indices);
+}
+
+template void locateNodesGpu(const uint32_t* k1,
+                             const TreeNodeIndex* map,
+                             size_t n,
+                             const uint32_t* nodeKeys,
+                             const TreeNodeIndex* lvlRange,
+                             TreeNodeIndex* indices);
+template void locateNodesGpu(const uint64_t* k1,
+                             const TreeNodeIndex* map,
+                             size_t n,
+                             const uint64_t* nodeKeys,
+                             const TreeNodeIndex* lvlRange,
+                             TreeNodeIndex* indices);
 
 } // namespace cstone

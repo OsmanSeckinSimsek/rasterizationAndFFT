@@ -1,26 +1,10 @@
 /*
- * MIT License
+ * Cornerstone octree
  *
- * Copyright (c) 2021 CSCS, ETH Zurich
- *               2021 University of Basel
+ * Copyright (c) 2024 CSCS, ETH Zurich
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Please, refer to the LICENSE file in the root directory.
+ * SPDX-License-Identifier: MIT License
  */
 
 /*! @file
@@ -33,7 +17,6 @@
 
 #include <cassert>
 #include <cmath>
-#include <cstdint>
 #include <type_traits>
 
 #include "cstone/primitives/clz.hpp"
@@ -55,7 +38,7 @@ namespace cstone
  * Integer conversion happens with truncation as required for SFC code calculations
  */
 template<class KeyType, class T>
-HOST_DEVICE_FUN inline unsigned toNBitInt(T x)
+HOST_DEVICE_FUN unsigned toNBitInt(T x)
 {
     // spatial resolution in bits per dimension
     constexpr unsigned nBits = maxTreeLevel<KeyType>{};
@@ -196,6 +179,14 @@ HOST_DEVICE_FUN constexpr KeyType encodePlaceholderBit(KeyType code, int prefixL
     return placeHolderMask | ret;
 }
 
+template<class KeyType>
+HOST_DEVICE_FUN constexpr KeyType encodePlaceholderBit2K(KeyType k1, KeyType k2)
+{
+    //! prefixLength is 3 * treeLevel(endKey - startKey)
+    unsigned prefixLength = countLeadingZeros(k2 - k1 - 1) - unusedBits<KeyType>{};
+    return encodePlaceholderBit(k1, prefixLength);
+}
+
 //! @brief returns the number of key-bits in the input @p code
 template<class KeyType>
 HOST_DEVICE_FUN constexpr unsigned decodePrefixLength(KeyType code)
@@ -219,6 +210,75 @@ HOST_DEVICE_FUN constexpr KeyType decodePlaceholderBit(KeyType code)
     KeyType ret             = code ^ placeHolderMask;
 
     return ret << (3 * maxTreeLevel<KeyType>{} - prefixLength);
+}
+
+/*! @brief decode an SFC key in Warren-Salmon placeholder bit format
+ *
+ * @tparam KeyType   32- or 64-bit unsigned integer
+ * @param code       input SFC key with 1-bit prepended
+ * @return           SFC-key without 1-bit and shifted to most significant bit
+ *
+ * Inverts encodePlaceholderBit.
+ */
+template<class KeyType>
+HOST_DEVICE_FUN constexpr util::tuple<KeyType, KeyType> decodePlaceholderBit2K(KeyType code)
+{
+    int prefixLength        = decodePrefixLength(code);
+    KeyType placeHolderMask = KeyType(1) << prefixLength;
+    KeyType ret             = code ^ placeHolderMask;
+
+    int nShifts = 3 * maxTreeLevel<KeyType>{} - prefixLength;
+    auto k1     = ret << nShifts;
+    return {k1, k1 + (KeyType(1) << nShifts)};
+}
+
+//! @brief locate with @p nodeKey given in Warren-Salmon placeholder-bit format
+template<class KeyType>
+HOST_DEVICE_FUN TreeNodeIndex locateNode(KeyType nodeKey, const KeyType* prefixes, const TreeNodeIndex* levelRange)
+{
+    TreeNodeIndex numNodes = levelRange[maxTreeLevel<KeyType>{} + 1];
+    unsigned level         = decodePrefixLength(nodeKey) / 3;
+    auto it                = stl::lower_bound(prefixes + levelRange[level], prefixes + levelRange[level + 1], nodeKey);
+    if (it != prefixes + numNodes && *it == nodeKey) { return it - prefixes; }
+    else { return numNodes; }
+}
+
+/*! @brief finds the index of the node with SFC key range [startKey:endKey]
+ *
+ * @param startKey   lower SFC key
+ * @param endKey     upper SFC key
+ * @return           The index i of the node that satisfies codeStart(i) == startKey
+ *                   and codeEnd(i) == endKey, or numTreeNodes() if no such node exists.
+ */
+template<class KeyType>
+HOST_DEVICE_FUN TreeNodeIndex
+locateNode(KeyType startKey, KeyType endKey, const KeyType* prefixes, const TreeNodeIndex* levelRange)
+{
+    //! prefixLength is 3 * treeLevel(endKey - startKey)
+    unsigned prefixLength = countLeadingZeros(endKey - startKey - 1) - unusedBits<KeyType>{};
+    return locateNode(encodePlaceholderBit(startKey, prefixLength), prefixes, levelRange);
+}
+
+//! @brief Mask key to set special status. Does not support WS-prefix keys.
+template<class KeyType>
+KeyType maskKey(KeyType key)
+{
+    if (key == 0 || key == nodeRange<KeyType>(0)) { return key; }
+    return key | nodeRange<KeyType>(0);
+}
+
+//! @brief Inverse of maskKey
+template<class KeyType>
+KeyType unmaskKey(KeyType key)
+{
+    if (key == nodeRange<KeyType>(0)) { return key; }
+    return key & (nodeRange<KeyType>(0) - 1);
+}
+
+template<class KeyType>
+bool isMasked(KeyType key)
+{
+    return key > nodeRange<KeyType>(0);
 }
 
 /*! @brief extract the n-th octal digit from an SFC key, starting from the most significant
@@ -332,7 +392,7 @@ HOST_DEVICE_FUN constexpr KeyType makePrefix(KeyType a)
  * @return      the power of 8 associated with the indicated octal place
  */
 template<class KeyType>
-constexpr KeyType octalPower(int pos)
+HOST_DEVICE_FUN constexpr KeyType octalPower(int pos)
 {
     return (KeyType(1) << 3 * (maxTreeLevel<KeyType>{} - pos));
 }
@@ -360,7 +420,7 @@ constexpr KeyType octalPower(int pos)
  *  subdivision level.
  */
 template<class KeyType, class Store>
-std::enable_if_t<std::is_same_v<Store, std::nullptr_t> || std::is_same_v<Store, KeyType*>, int>
+HOST_DEVICE_FUN std::enable_if_t<std::is_same_v<Store, std::nullptr_t> || std::is_same_v<Store, KeyType*>, int>
 spanSfcRange(KeyType a, KeyType b, [[maybe_unused]] Store output)
 {
     int numValues = 0;
@@ -402,7 +462,7 @@ spanSfcRange(KeyType a, KeyType b, [[maybe_unused]] Store output)
 //! @brief overload to skip storage and just compute number of values, see spanSfcRange(KeyType a, KeyType b, KeyType*
 //! output) above
 template<class KeyType>
-int spanSfcRange(KeyType a, KeyType b)
+HOST_DEVICE_FUN int spanSfcRange(KeyType a, KeyType b)
 {
     return spanSfcRange<KeyType, std::nullptr_t>(a, b, nullptr);
 }

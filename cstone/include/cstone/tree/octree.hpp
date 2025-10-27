@@ -1,26 +1,10 @@
 /*
- * MIT License
+ * Cornerstone octree
  *
- * Copyright (c) 2021 CSCS, ETH Zurich
- *               2021 University of Basel
+ * Copyright (c) 2024 CSCS, ETH Zurich
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Please, refer to the LICENSE file in the root directory.
+ * SPDX-License-Identifier: MIT License
  */
 
 /*! @file
@@ -39,16 +23,16 @@
 
 #pragma once
 
-#include <iterator>
+#include <span>
 #include <vector>
 
 #include "cstone/cuda/annotation.hpp"
 #include "cstone/cuda/cuda_utils.hpp"
+#include "cstone/cuda/device_vector.h"
 #include "cstone/primitives/gather.hpp"
+#include "cstone/primitives/primitives_acc.hpp"
 #include "cstone/sfc/sfc.hpp"
-#include "cstone/tree/accel_switch.hpp"
 #include "cstone/tree/csarray.hpp"
-#include "cstone/util/gsl-lite.hpp"
 
 namespace cstone
 {
@@ -86,7 +70,6 @@ HOST_DEVICE_FUN constexpr TreeNodeIndex binaryKeyWeight(KeyType key, unsigned le
  * @param[in]  leaves            cornerstone SFC keys, length numLeafNodes + 1
  * @param[in]  numInternalNodes  number of internal octree nodes
  * @param[in]  numLeafNodes      total number of nodes
- * @param[in]  binaryToOct       translation map from binary to octree nodes
  * @param[out] prefixes          output octree SFC keys, length @p numInternalNodes + numLeafNodes
  *                               NOTE: keys are prefixed with Warren-Salmon placeholder bits!
  * @param[out] internalToLeaf    iota 0,1,2,3,... sequence for later use, length same as @p prefixes
@@ -212,33 +195,6 @@ void buildOctreeCpu(const KeyType* cstoneTree,
     linkTreeCpu(prefixes, numInternalNodes, leafToInternal, levelRange, childOffsets, parents);
 }
 
-//! @brief locate with @p nodeKey given in Warren-Salmon placeholder-bit format
-template<class KeyType>
-HOST_DEVICE_FUN TreeNodeIndex locateNode(KeyType nodeKey, const KeyType* prefixes, const TreeNodeIndex* levelRange)
-{
-    TreeNodeIndex numNodes = levelRange[maxTreeLevel<KeyType>{} + 1];
-    unsigned level         = decodePrefixLength(nodeKey) / 3;
-    auto it                = stl::lower_bound(prefixes + levelRange[level], prefixes + levelRange[level + 1], nodeKey);
-    if (it != prefixes + numNodes && *it == nodeKey) { return it - prefixes; }
-    else { return numNodes; }
-}
-
-/*! @brief finds the index of the node with SFC key range [startKey:endKey]
- *
- * @param startKey   lower SFC key
- * @param endKey     upper SFC key
- * @return           The index i of the node that satisfies codeStart(i) == startKey
- *                   and codeEnd(i) == endKey, or numTreeNodes() if no such node exists.
- */
-template<class KeyType>
-HOST_DEVICE_FUN TreeNodeIndex
-locateNode(KeyType startKey, KeyType endKey, const KeyType* prefixes, const TreeNodeIndex* levelRange)
-{
-    //! prefixLength is 3 * treeLevel(endKey - startKey)
-    unsigned prefixLength = countLeadingZeros(endKey - startKey - 1) - unusedBits<KeyType>{};
-    return locateNode(encodePlaceholderBit(startKey, prefixLength), prefixes, levelRange);
-}
-
 //! @brief return the smallest node that contains @p nodeKey
 template<class KeyType>
 HOST_DEVICE_FUN TreeNodeIndex containingNode(KeyType nodeKey,
@@ -287,50 +243,40 @@ struct OctreeView
     NodeType* childOffsets;
     NodeType* parents;
     NodeType* levelRange;
+    NodeType* d_levelRange;
     NodeType* internalToLeaf;
     NodeType* leafToInternal;
+    KeyType* leaves{nullptr};
+
+    std::span<NodeType> leafToInternalSpan() { return {leafToInternal + numInternalNodes, size_t(numLeafNodes)}; }
+    std::span<NodeType> levelRangeSpan() { return {levelRange, maxTreeLevel<std::decay_t<KeyType>>{} + 2}; }
+    std::span<NodeType> childOffsetsSpan() { return {childOffsets, numNodes}; }
+    std::span<KeyType> leafSpan() { return {leaves, size_t(numLeafNodes + 1)}; }
 };
 
 //! @brief Octree data and properties needed for neighbor search traversal
 template<class T, class KeyType>
 struct OctreeNsView
 {
+    TreeNodeIndex numLeafNodes;
     //! @brief see OctreeData
     const KeyType* prefixes;
     const TreeNodeIndex* childOffsets;
+    const TreeNodeIndex* parents;
     const TreeNodeIndex* internalToLeaf;
     const TreeNodeIndex* levelRange;
+    const KeyType* leaves;
 
     //! @brief index of first particle for each leaf node
     const LocalIndex* layout;
     //! @brief geometrical node centers and sizes
     const Vec3<T>* centers;
     const Vec3<T>* sizes;
-};
 
-/*! @brief Contains a view to octree data as well as associated node properties
- *
- * This container is used in both CPU and GPU contexts
- */
-template<class T, class KeyType>
-struct OctreeProperties
-{
-    OctreeNsView<T, KeyType> nsView() const
-    {
-        return {tree.prefixes, tree.childOffsets, tree.internalToLeaf, tree.levelRange, layout, centers, sizes};
-    }
-
-    //! @brief data view of the fully linked octree
-    OctreeView<const KeyType> tree;
-
-    //! @brief geometrical node centers and sizes of the fully linked tree
-    const Vec3<T>* centers;
-    const Vec3<T>* sizes;
-
-    //! @brief cornerstone leaf cell array
-    const KeyType* leaves;
-    //! @brief index of first particle for each leaf node
-    const LocalIndex* layout;
+    /*! @ brief Factor to enlarge target bounding boxes to compensate for slightly outdated trees
+     *          Default for fully converged trees: 1.0, >1.0 otherwise
+     */
+    float searchExtFactor{1.0};
 };
 
 template<class KeyType, class Accelerator>
@@ -338,8 +284,7 @@ class OctreeData
 {
     //! @brief A vector template that resides on the hardware specified as Accelerator
     template<class ValueType>
-    using AccVector =
-        typename AccelSwitchType<Accelerator, std::vector, thrust::device_vector>::template type<ValueType>;
+    using AccVector = std::conditional_t<HaveGpu<Accelerator>{}, DeviceVector<ValueType>, std::vector<ValueType>>;
 
 public:
     void resize(TreeNodeIndex numCsLeafNodes)
@@ -356,21 +301,37 @@ public:
         reallocateDestructive(parents, parentSize, 1.01);
 
         //+1 due to level 0 and +1 due to the upper bound for the last level
-        reallocateDestructive(levelRange, maxTreeLevel<KeyType>{} + 2, 1.01);
+        reallocate(maxTreeLevel<KeyType>{} + 2, 1.0, levelRange, d_levelRange);
     }
 
     OctreeView<KeyType> data()
     {
-        return {numLeafNodes,       numInternalNodes,       numNodes,
-                rawPtr(prefixes),   rawPtr(childOffsets),   rawPtr(parents),
-                rawPtr(levelRange), rawPtr(internalToLeaf), rawPtr(leafToInternal)};
+        return {numLeafNodes,
+                numInternalNodes,
+                numNodes,
+                rawPtr(prefixes),
+                rawPtr(childOffsets),
+                rawPtr(parents),
+                rawPtr(levelRange),
+                rawPtr(d_levelRange),
+                rawPtr(internalToLeaf),
+                rawPtr(leafToInternal),
+                nullptr};
     }
 
-    OctreeView<const KeyType> data() const
+    OctreeView<const KeyType> cdata() const
     {
-        return {numLeafNodes,       numInternalNodes,       numNodes,
-                rawPtr(prefixes),   rawPtr(childOffsets),   rawPtr(parents),
-                rawPtr(levelRange), rawPtr(internalToLeaf), rawPtr(leafToInternal)};
+        return {numLeafNodes,
+                numInternalNodes,
+                numNodes,
+                rawPtr(prefixes),
+                rawPtr(childOffsets),
+                rawPtr(parents),
+                rawPtr(levelRange),
+                rawPtr(d_levelRange),
+                rawPtr(internalToLeaf),
+                rawPtr(leafToInternal),
+                nullptr};
     }
 
     TreeNodeIndex numNodes{0};
@@ -384,7 +345,8 @@ public:
     //! @brief stores the parent index for every group of 8 sibling nodes, length the (numNodes - 1) / 8
     AccVector<TreeNodeIndex> parents;
     //! @brief store the first node index of every tree level, length = maxTreeLevel + 2
-    AccVector<TreeNodeIndex> levelRange;
+    std::vector<TreeNodeIndex> levelRange;
+    AccVector<TreeNodeIndex> d_levelRange;
 
     //! @brief maps internal to leaf (cstone) order
     AccVector<TreeNodeIndex> internalToLeaf;
@@ -393,15 +355,16 @@ public:
 };
 
 template<class KeyType>
-void updateInternalTree(gsl::span<const KeyType> leaves, OctreeView<KeyType> o)
+void updateInternalTree(std::span<const KeyType> leaves, OctreeView<KeyType> o)
 {
     assert(size_t(o.numLeafNodes) == nNodes(leaves));
     buildOctreeCpu(leaves.data(), o.numLeafNodes, o.numInternalNodes, o.prefixes, o.childOffsets, o.parents,
                    o.levelRange, o.internalToLeaf, o.leafToInternal);
+    std::copy(o.levelRangeSpan().begin(), o.levelRangeSpan().end(), o.d_levelRange);
 }
 
 template<class KeyType, class Accelerator>
-gsl::span<const TreeNodeIndex> leafToInternal(const OctreeData<KeyType, Accelerator>& octree)
+std::span<const TreeNodeIndex> leafToInternal(const OctreeData<KeyType, Accelerator>& octree)
 {
     return {rawPtr(octree.leafToInternal) + octree.numInternalNodes, size_t(octree.numLeafNodes)};
 }
@@ -430,7 +393,7 @@ public:
     }
 
     //! @brief rebalance based on leaf counts only, optimized version that avoids unnecessary allocations
-    bool rebalance(unsigned bucketSize, gsl::span<const unsigned> counts)
+    bool rebalance(unsigned bucketSize, std::span<const unsigned> counts)
     {
         assert(childOffsets_.size() >= cstoneTree_.size());
 
@@ -445,36 +408,52 @@ public:
 
     OctreeView<KeyType> data()
     {
-        return {numLeafNodes_,      numInternalNodes_,      levelRange_.back(),
-                prefixes_.data(),   childOffsets_.data(),   parents_.data(),
-                levelRange_.data(), internalToLeaf_.data(), leafToInternal_.data()};
+        return {numLeafNodes_,
+                numInternalNodes_,
+                levelRange_.back(),
+                prefixes_.data(),
+                childOffsets_.data(),
+                parents_.data(),
+                levelRange_.data(),
+                nullptr,
+                internalToLeaf_.data(),
+                leafToInternal_.data(),
+                nullptr};
     }
 
-    OctreeView<const KeyType> data() const
+    OctreeView<const KeyType> cdata() const
     {
-        return {numLeafNodes_,      numInternalNodes_,      levelRange_.back(),
-                prefixes_.data(),   childOffsets_.data(),   parents_.data(),
-                levelRange_.data(), internalToLeaf_.data(), leafToInternal_.data()};
+        return {numLeafNodes_,
+                numInternalNodes_,
+                levelRange_.back(),
+                prefixes_.data(),
+                childOffsets_.data(),
+                parents_.data(),
+                levelRange_.data(),
+                nullptr,
+                internalToLeaf_.data(),
+                leafToInternal_.data(),
+                nullptr};
     }
 
     //! @brief return a const view of the cstone leaf array
-    gsl::span<const KeyType> treeLeaves() const { return cstoneTree_; }
+    std::span<const KeyType> treeLeaves() const { return cstoneTree_; }
     //! @brief return const pointer to node(cell) SFC keys
-    gsl::span<const KeyType> nodeKeys() const { return prefixes_; }
+    std::span<const KeyType> nodeKeys() const { return prefixes_; }
     //! @brief return const pointer to child offsets array
-    gsl::span<const TreeNodeIndex> childOffsets() const { return childOffsets_; }
+    std::span<const TreeNodeIndex> childOffsets() const { return childOffsets_; }
     //! @brief return const pointer to the cell parents array
-    gsl::span<const TreeNodeIndex> parents() const { return parents_; }
+    std::span<const TreeNodeIndex> parents() const { return parents_; }
 
     //! @brief stores the first internal node index of each tree subdivision level
-    gsl::span<const TreeNodeIndex> levelRange() const { return levelRange_; }
+    std::span<const TreeNodeIndex> levelRange() const { return levelRange_; }
     //! @brief converts a cornerstone index into an internal index
-    gsl::span<const TreeNodeIndex> internalOrder() const
+    std::span<const TreeNodeIndex> internalOrder() const
     {
         return {leafToInternal_.data() + numInternalNodes_, size_t(numLeafNodes_)};
     }
     //! @brief converts  an internal index into a cornerstone index
-    gsl::span<const TreeNodeIndex> toLeafOrder() const { return {internalToLeaf_.data(), size_t(numTreeNodes())}; }
+    std::span<const TreeNodeIndex> toLeafOrder() const { return {internalToLeaf_.data(), size_t(numTreeNodes())}; }
 
     //! @brief total number of nodes in the tree
     inline TreeNodeIndex numTreeNodes() const { return levelRange_.back(); }
@@ -599,8 +578,8 @@ private:
 };
 
 template<class T, class CombinationFunction>
-void upsweep(gsl::span<const TreeNodeIndex> levelOffset,
-             gsl::span<const TreeNodeIndex> childOffsets,
+void upsweep(std::span<const TreeNodeIndex> levelOffset,
+             const TreeNodeIndex* childOffsets,
              T* quantities,
              CombinationFunction&& combinationFunction)
 {
@@ -613,7 +592,7 @@ void upsweep(gsl::span<const TreeNodeIndex> levelOffset,
 #pragma omp parallel for schedule(static)
         for (TreeNodeIndex i = start; i < end; ++i)
         {
-            cstone::TreeNodeIndex firstChild = childOffsets[i];
+            TreeNodeIndex firstChild = childOffsets[i];
             if (firstChild) { quantities[i] = combinationFunction(i, firstChild, quantities); }
         }
     }
@@ -631,6 +610,7 @@ struct SumCombination
 template<class CountType>
 struct NodeCount
 {
+    HOST_DEVICE_FUN
     CountType operator()(TreeNodeIndex /*nodeIdx*/, TreeNodeIndex c, const CountType* Q)
     {
         uint64_t sum = Q[c];
@@ -638,7 +618,7 @@ struct NodeCount
         {
             sum += Q[c + octant];
         }
-        return stl::min(uint64_t(std::numeric_limits<CountType>::max()), sum);
+        return stl::min(uint64_t(0xFFFFFFFF), sum);
     }
 };
 

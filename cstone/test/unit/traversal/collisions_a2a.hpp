@@ -1,26 +1,10 @@
 /*
- * MIT License
+ * Cornerstone octree
  *
- * Copyright (c) 2021 CSCS, ETH Zurich
- *               2021 University of Basel
+ * Copyright (c) 2024 CSCS, ETH Zurich
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Please, refer to the LICENSE file in the root directory.
+ * SPDX-License-Identifier: MIT License
  */
 
 /*! @file
@@ -47,31 +31,39 @@ namespace cstone
  * Naive implementation without tree traversal for reference
  * and testing purposes
  */
-template<class KeyType>
-void findCollisions2All(gsl::span<const KeyType> tree,
-                        std::vector<TreeNodeIndex>& collisionList,
-                        const IBox& collisionBox)
+template<class KeyType, class T>
+void findCollisions2All(std::span<const KeyType> nodeKeys,
+                        const Vec3<T>* nodeCenters,
+                        const Vec3<T>* nodeSizes,
+                        const Box<T>& box,
+                        Vec3<T> targetCenter,
+                        Vec3<T> targetSize,
+                        std::vector<TreeNodeIndex>& collisionList)
 {
-    for (TreeNodeIndex idx = 0; idx < TreeNodeIndex(nNodes(tree)); ++idx)
+    for (TreeNodeIndex idx = 0; idx < TreeNodeIndex(nodeKeys.size()); ++idx)
     {
-        IBox nodeBox = sfcIBox(sfcKey(tree[idx]), sfcKey(tree[idx + 1]));
-        if (overlap<KeyType>(nodeBox, collisionBox)) { collisionList.push_back(idx); }
+        if (norm2(minDistance(targetCenter, targetSize, nodeCenters[idx], nodeSizes[idx], box)) == 0.0)
+        {
+            collisionList.push_back(idx);
+        }
     }
 }
 
 //! @brief all-to-all implementation of findAllCollisions
 template<class KeyType, class T>
-std::vector<std::vector<TreeNodeIndex>>
-findCollisionsAll2all(gsl::span<const KeyType> tree, const std::vector<T>& haloRadii, const Box<T>& globalBox)
+std::vector<std::vector<TreeNodeIndex>> findCollisionsAll2all(std::span<const KeyType> nodeKeys,
+                                                              const Vec3<T>* tC,
+                                                              const Vec3<T>* tS,
+                                                              TreeNodeIndex numTargets,
+                                                              const Box<T>& box)
 {
-    std::vector<std::vector<TreeNodeIndex>> collisions(tree.size() - 1);
+    std::vector<Vec3<T>> nodeCenters(nodeKeys.size()), nodeSizes(nodeKeys.size());
+    nodeFpCenters<KeyType>(nodeKeys, nodeCenters.data(), nodeSizes.data(), box);
 
-    for (TreeNodeIndex leafIdx = 0; leafIdx < TreeNodeIndex(nNodes(tree)); ++leafIdx)
+    std::vector<std::vector<TreeNodeIndex>> collisions(numTargets);
+    for (TreeNodeIndex i = 0; i < numTargets; ++i)
     {
-        T radius = haloRadii[leafIdx];
-
-        IBox haloBox = makeHaloBox(tree[leafIdx], tree[leafIdx + 1], radius, globalBox);
-        findCollisions2All<KeyType>(tree, collisions[leafIdx], haloBox);
+        findCollisions2All<KeyType>(nodeKeys, nodeCenters.data(), nodeSizes.data(), box, tC[i], tS[i], collisions[i]);
     }
 
     return collisions;

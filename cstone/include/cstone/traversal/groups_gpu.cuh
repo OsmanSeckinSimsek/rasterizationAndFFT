@@ -1,69 +1,29 @@
 /*
- * MIT License
+ * Cornerstone octree
  *
- * Copyright (c) 2023 CSCS, ETH Zurich, University of Basel, University of Zurich
+ * Copyright (c) 2024 CSCS, ETH Zurich
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Please, refer to the LICENSE file in the root directory.
+ * SPDX-License-Identifier: MIT License
  */
 
 /*! @file
- * @brief Particle target grouping
+ * @brief Particle target grouping.
  *
  * @author Sebastian Keller <sebastian.f.keller@gmail.com>
+ *
+ * Separate header to allow inclusion in library as well as in unit testing of device-side functions
  */
 
-#pragma once
-
+#include "cstone/cuda/cuda_utils.cuh"
 #include "cstone/cuda/gpu_config.cuh"
-#include "cstone/primitives/math.hpp"
-#include "cstone/primitives/primitives_gpu.h"
 #include "cstone/primitives/warpscan.cuh"
 #include "cstone/sfc/sfc.hpp"
-#include "cstone/tree/definitions.h"
+#include "cstone/traversal/groups_gpu.h"
+#include "cstone/util/array.hpp"
 
 namespace cstone
 {
-
-//! @brief simple-fixed width group targets
-template<class T>
-__global__ void groupTargets(LocalIndex first,
-                             LocalIndex last,
-                             const T* x,
-                             const T* y,
-                             const T* z,
-                             const T* h,
-                             unsigned groupSize,
-                             LocalIndex* groups,
-                             unsigned numGroups)
-{
-    LocalIndex tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-    LocalIndex groupIdx = tid / groupSize;
-    if (groupIdx >= numGroups) { return; }
-
-    if (tid == groupIdx * groupSize)
-    {
-        LocalIndex scan  = first + groupIdx * groupSize;
-        groups[groupIdx] = scan;
-        if (groupIdx + 1 == numGroups) { groups[numGroups] = last; }
-    }
-}
 
 /*! @brief Computes splitting patterns of target particle groups
  *
@@ -109,7 +69,7 @@ __device__ util::array<GpuConfig::ThreadMask, N> findSplits(util::array<Vec4<T>,
     for (int k = 0; k < N; ++k)
     {
         T distSq   = norm2(Xnext[k] - Xlane[k]);
-        bool split = distSq > distCritSq;
+        bool split = distSq > stl::min(distCritSq, pos[k][3] * pos[k][3]);
         splits[k]  = ballotSync(split);
     }
 
@@ -139,7 +99,7 @@ __device__ void makeSplits(util::array<GpuConfig::ThreadMask, N> split, LocalInd
             int length = countTrailingZeros(mask) + 1;
             bitsRemaining -= length;
             *splitLengths++ = length + carry;
-            carry = 0;
+            carry           = 0;
             mask >>= length;
         }
         return carry + bitsRemaining;
@@ -207,7 +167,7 @@ __global__ void groupSplitsKernel(LocalIndex first,
     LocalIndex warpIdx = tid / GpuConfig::warpSize;
     LocalIndex laneIdx = threadIdx.x & (GpuConfig::warpSize - 1);
 
-    if (warpIdx * groupSize >= last) { return; }
+    if (warpIdx * groupSize >= last - first) { return; }
 
     LocalIndex bodyIdx[nwt];
     for (int k = 0; k < nwt; ++k)
@@ -230,7 +190,7 @@ __global__ void groupSplitsKernel(LocalIndex first,
         T vol      = 8 * nodeSize[0] * nodeSize[1] * nodeSize[2];
         nodeVolume = min(vol, nodeVolume);
     }
-    nodeVolume = warpMin(nodeVolume);
+    nodeVolume  = warpMin(nodeVolume);
     Tc distCrit = std::cbrt(nodeVolume) * tolFactor;
 
     // load target coordinates
@@ -238,7 +198,7 @@ __global__ void groupSplitsKernel(LocalIndex first,
     for (int k = 0; k < nwt; k++)
     {
         pos_i[k] = {x[bodyIdx[k]] * box.ilx(), y[bodyIdx[k]] * box.ily(), z[bodyIdx[k]] * box.ilz(),
-                    h ? Tc(2) * h[bodyIdx[k]] : Tc(0)};
+                    h ? Tc(2) * h[bodyIdx[k]] / box.minExtent() : Tc(1)};
     }
 
     auto splitMask = findSplits(pos_i, distCrit * distCrit);
@@ -253,54 +213,6 @@ __global__ void groupSplitsKernel(LocalIndex first,
         }
         numSplitsPerGroup[warpIdx] = numSubGroups;
     }
-}
-
-//! @brief convenience wrapper for groupSplitsKernel
-template<unsigned groupSize, class Tc, class T, class KeyType>
-void computeGroupSplits(
-    LocalIndex first,
-    LocalIndex last,
-    const Tc* x,
-    const Tc* y,
-    const Tc* z,
-    const T* h,
-    const KeyType* leaves,
-    TreeNodeIndex numLeaves,
-    const LocalIndex* layout,
-    const Box<Tc> box,
-    float tolFactor,
-    thrust::device_vector<util::array<GpuConfig::ThreadMask, groupSize / GpuConfig::warpSize>>& splitMasks,
-    thrust::device_vector<LocalIndex>& numSplitsPerGroup,
-    thrust::device_vector<LocalIndex>& groups)
-{
-    LocalIndex numParticles   = last - first;
-    LocalIndex numFixedGroups = iceil(numParticles, groupSize);
-    unsigned numThreads       = 256;
-    unsigned gridSize         = numFixedGroups * GpuConfig::warpSize;
-
-    splitMasks.resize(numFixedGroups);
-
-    numSplitsPerGroup.reserve(numFixedGroups * 1.1);
-    numSplitsPerGroup.resize(numFixedGroups);
-
-    groupSplitsKernel<groupSize><<<iceil(gridSize, numThreads), numThreads>>>(
-        first, last, x, y, z, h, leaves, numLeaves, layout, box, tolFactor, rawPtr(splitMasks),
-        rawPtr(numSplitsPerGroup), numFixedGroups);
-
-    groups.reserve(numFixedGroups * 1.1);
-    groups.resize(numFixedGroups + 1);
-    exclusiveScanGpu(rawPtr(numSplitsPerGroup), rawPtr(numSplitsPerGroup) + numFixedGroups + 1, rawPtr(groups));
-    LocalIndex newNumGroups = groups.back();
-
-    auto& newGroupSizes = numSplitsPerGroup;
-    newGroupSizes.resize(newNumGroups);
-
-    makeSplitsKernel<<<numFixedGroups, numThreads>>>(rawPtr(splitMasks), rawPtr(groups), numFixedGroups,
-                                                     rawPtr(newGroupSizes));
-
-    groups.resize(newNumGroups + 1);
-    exclusiveScanGpu(rawPtr(newGroupSizes), rawPtr(newGroupSizes) + newNumGroups + 1, rawPtr(groups), first);
-    groups.back() = last;
 }
 
 } // namespace cstone
