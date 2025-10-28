@@ -1,0 +1,17 @@
+<map id="value_list.hpp" name="value_list.hpp">
+<area shape="rect" id="Node000001" title="Utility functions to use compile&#45;time strings as arguments to get on tuples." alt="" coords="255,5,369,31"/>
+<area shape="rect" id="Node000002" href="$constexpr__string_8hpp.html" title="Constexpr string based on C++20 structural types." alt="" coords="233,79,391,119"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="315,31,315,65,309,65,309,31"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="5,167,91,192"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="250,121,101,165,99,160,248,116"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="115,167,213,192"/>
+<area shape="poly" id="edge3_Node000002_Node000004" title=" " alt="" coords="278,121,199,162,197,158,275,116"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="237,167,291,192"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="303,120,281,156,276,153,298,117"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="315,167,407,192"/>
+<area shape="poly" id="edge5_Node000002_Node000006" title=" " alt="" coords="326,117,349,154,345,156,322,120"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="431,167,491,192"/>
+<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="349,116,428,158,426,162,347,121"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="515,167,578,192"/>
+<area shape="poly" id="edge7_Node000002_Node000008" title=" " alt="" coords="369,116,503,161,501,166,367,121"/>
+</map>

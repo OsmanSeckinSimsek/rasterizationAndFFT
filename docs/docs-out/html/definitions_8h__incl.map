@@ -1,0 +1,19 @@
+<map id="definitions.h" name="definitions.h">
+<area shape="rect" id="Node000001" title=" " alt="" coords="201,5,303,31"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,79,72,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="219,33,86,77,84,72,217,28"/>
+<area shape="rect" id="Node000003" href="$annotation_8hpp.html" title="Defines macros for enabling device code compilation." alt="" coords="205,152,408,177"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="264,29,279,51,293,78,302,109,307,138,302,139,297,110,288,80,274,54,259,32"/>
+<area shape="rect" id="Node000004" href="$stl_8hpp.html" title="Functionality that exist in std::, but cannot be used in device code." alt="" coords="97,79,279,104"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="243,33,209,70,205,67,239,29"/>
+<area shape="rect" id="Node000006" href="$array_8hpp.html" title="implementation of a compile&#45;time size array that can be used on the host and device" alt="" coords="376,79,531,104"/>
+<area shape="poly" id="edge6_Node000001_Node000006" title=" " alt="" coords="285,28,409,71,407,77,283,33"/>
+<area shape="poly" id="edge5_Node000004_Node000003" title=" " alt="" coords="208,102,277,142,274,147,206,106"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="89,152,181,177"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="181,106,154,143,149,140,177,103"/>
+<area shape="poly" id="edge9_Node000006_Node000003" title=" " alt="" coords="431,106,344,148,342,144,429,102"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="433,152,495,177"/>
+<area shape="poly" id="edge7_Node000006_Node000007" title=" " alt="" coords="458,104,463,138,458,139,452,105"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="519,152,579,177"/>
+<area shape="poly" id="edge8_Node000006_Node000008" title=" " alt="" coords="470,102,524,141,521,146,467,106"/>
+</map>

@@ -1,0 +1,52 @@
+<map id="hilbert.hpp" name="hilbert.hpp">
+<area shape="rect" id="Node000001" title="3D Hilbert encoding/decoding in 32&#45; and 64&#45;bit" alt="" coords="269,5,361,31"/>
+<area shape="rect" id="Node000002" href="$morton_8hpp.html" title="3D Morton encoding/decoding in 32&#45; and 64&#45;bit using the magic number method" alt="" coords="266,79,364,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="318,31,318,65,312,65,312,31"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="40,225,110,251"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="297,106,107,220,105,216,294,102"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="81,372,144,397"/>
+<area shape="poly" id="edge3_Node000002_Node000004" title=" " alt="" coords="267,100,205,112,135,135,100,152,67,172,38,197,15,227,9,246,10,271,16,298,28,323,49,346,75,363,72,368,45,350,23,325,11,300,4,272,4,245,10,224,34,193,64,168,97,147,133,130,204,107,266,95"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="888,299,955,324"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="364,93,501,104,676,127,762,144,840,166,901,192,925,207,942,224,949,239,950,256,939,287,934,285,944,255,944,240,938,227,922,211,899,196,838,171,761,149,675,132,500,109,364,98"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="946,372,1038,397"/>
+<area shape="poly" id="edge5_Node000002_Node000006" title=" " alt="" coords="364,93,613,112,747,129,802,139,844,149,904,173,950,200,968,218,983,239,995,266,1005,298,1008,330,1003,359,998,358,1002,329,1000,299,990,268,978,242,963,221,946,204,902,177,842,155,801,144,746,134,612,118,363,98"/>
+<area shape="rect" id="Node000007" href="$tuple_8hpp.html" title="Wrapper around different types of tuples compatible with device code." alt="" coords="134,225,288,251"/>
+<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="307,106,268,154,227,215,223,212,263,150,303,102"/>
+<area shape="rect" id="Node000010" href="$box_8hpp.html" title="implements a bounding bounding box for floating point coordinates and integer indices" alt="" coords="278,152,352,177"/>
+<area shape="poly" id="edge9_Node000002_Node000010" title=" " alt="" coords="318,104,318,138,312,138,312,104"/>
+<area shape="rect" id="Node000015" href="$common_8hpp.html" title="Common operations on SFC keys that do not depend on the specific SFC used." alt="" coords="500,152,607,177"/>
+<area shape="poly" id="edge25_Node000002_Node000015" title=" " alt="" coords="354,101,502,145,501,151,352,107"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="128,299,182,324"/>
+<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="204,253,175,289,170,286,200,249"/>
+<area shape="rect" id="Node000009" href="$annotation_8hpp.html" title="Defines macros for enabling device code compilation." alt="" coords="424,372,627,397"/>
+<area shape="poly" id="edge8_Node000007_Node000009" title=" " alt="" coords="280,248,352,267,425,296,471,327,507,360,504,364,468,331,423,301,350,272,279,253"/>
+<area shape="poly" id="edge10_Node000010_Node000003" title=" " alt="" coords="278,180,124,225,122,220,277,174"/>
+<area shape="poly" id="edge11_Node000010_Node000004" title=" " alt="" coords="278,171,214,176,139,187,71,203,46,214,30,227,21,243,20,261,24,279,33,297,59,332,89,361,85,365,55,336,28,300,19,281,14,261,16,242,26,224,44,210,69,198,138,182,213,171,277,165"/>
+<area shape="poly" id="edge24_Node000010_Node000007" title=" " alt="" coords="300,180,241,219,238,215,297,175"/>
+<area shape="poly" id="edge12_Node000010_Node000009" title=" " alt="" coords="327,176,401,249,432,272,462,297,490,329,512,359,508,362,486,332,458,301,428,276,397,253,323,179"/>
+<area shape="rect" id="Node000011" href="$stl_8hpp.html" title="Functionality that exist in std::, but cannot be used in device code." alt="" coords="589,299,772,324"/>
+<area shape="poly" id="edge13_Node000010_Node000011" title=" " alt="" coords="332,175,384,211,453,248,529,275,603,293,602,298,528,280,451,253,381,216,329,180"/>
+<area shape="rect" id="Node000012" href="$definitions_8h.html" title=" " alt="" coords="464,225,643,251"/>
+<area shape="poly" id="edge16_Node000010_Node000012" title=" " alt="" coords="353,175,503,219,501,224,352,180"/>
+<area shape="poly" id="edge14_Node000011_Node000006" title=" " alt="" coords="731,321,933,367,932,372,730,327"/>
+<area shape="poly" id="edge15_Node000011_Node000009" title=" " alt="" coords="656,326,564,369,562,364,654,322"/>
+<area shape="poly" id="edge17_Node000012_Node000005" title=" " alt="" coords="613,248,875,298,874,304,612,253"/>
+<area shape="poly" id="edge18_Node000012_Node000009" title=" " alt="" coords="554,252,533,359,528,358,549,251"/>
+<area shape="poly" id="edge19_Node000012_Node000011" title=" " alt="" coords="575,248,649,289,646,294,573,253"/>
+<area shape="rect" id="Node000013" href="$array_8hpp.html" title="implementation of a compile&#45;time size array that can be used on the host and device" alt="" coords="258,299,412,324"/>
+<area shape="poly" id="edge20_Node000012_Node000013" title=" " alt="" coords="519,253,384,297,383,292,518,248"/>
+<area shape="poly" id="edge21_Node000013_Node000004" title=" " alt="" coords="300,327,157,372,156,367,298,321"/>
+<area shape="poly" id="edge23_Node000013_Node000009" title=" " alt="" coords="366,322,482,364,481,369,365,327"/>
+<area shape="rect" id="Node000014" title=" " alt="" coords="305,372,365,397"/>
+<area shape="poly" id="edge22_Node000013_Node000014" title=" " alt="" coords="338,324,338,358,332,358,332,324"/>
+<area shape="poly" id="edge26_Node000015_Node000003" title=" " alt="" coords="500,174,336,194,124,228,123,223,335,189,500,169"/>
+<area shape="poly" id="edge27_Node000015_Node000004" title=" " alt="" coords="524,180,401,229,323,263,247,301,190,334,141,366,138,362,187,330,244,296,321,258,399,224,522,175"/>
+<area shape="poly" id="edge28_Node000015_Node000005" title=" " alt="" coords="607,164,688,168,781,178,864,195,896,208,918,224,927,238,931,254,930,285,925,285,926,254,922,240,914,227,894,212,863,200,780,183,688,174,607,170"/>
+<area shape="poly" id="edge29_Node000015_Node000006" title=" " alt="" coords="607,165,692,170,791,180,881,197,916,209,942,223,967,254,983,290,991,327,994,358,989,358,986,327,978,292,963,256,938,227,914,214,880,202,790,185,692,175,607,170"/>
+<area shape="poly" id="edge34_Node000015_Node000007" title=" " alt="" coords="501,180,280,225,279,220,499,174"/>
+<area shape="poly" id="edge32_Node000015_Node000011" title=" " alt="" coords="587,175,624,194,657,224,673,254,680,284,675,285,668,256,653,227,621,199,585,180"/>
+<area shape="poly" id="edge33_Node000015_Node000012" title=" " alt="" coords="556,178,556,212,551,212,551,178"/>
+<area shape="rect" id="Node000016" href="$clz_8hpp.html" title="count leading zeros in unsigned integers" alt="" coords="718,225,904,251"/>
+<area shape="poly" id="edge30_Node000015_Node000016" title=" " alt="" coords="596,175,757,219,755,224,594,180"/>
+<area shape="poly" id="edge31_Node000016_Node000009" title=" " alt="" coords="813,252,807,288,799,308,786,326,760,341,723,354,632,373,631,367,721,349,758,336,782,322,795,306,802,287,808,251"/>
+</map>

@@ -1,0 +1,15 @@
+<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
+<area shape="rect" id="Node000000" href="$structstl_1_1integral__constant.html" title=" " alt="" coords="5,210,164,250"/>
+<area shape="rect" id="Node000001" href="$structcstone_1_1unusedBits_3_01HilbertKey_3_01unsigned_01long_01_4_01_4.html" title=" " alt="" coords="213,5,392,60"/>
+<area shape="poly" id="edge27_Node000000_Node000001" title=" " alt="" coords="102,197,147,133,177,99,210,69,228,58,231,62,214,73,181,103,151,137,107,200"/>
+<area shape="rect" id="Node000002" href="$structcstone_1_1unusedBits_3_01HilbertKey_3_01unsigned_01long_01long_01_4_01_4.html" title=" " alt="" coords="213,84,392,139"/>
+<area shape="poly" id="edge28_Node000000_Node000002" title=" " alt="" coords="125,200,211,148,234,136,236,141,213,152,127,205"/>
+<area shape="rect" id="Node000003" href="$structcstone_1_1unusedBits_3_01MortonKey_3_01unsigned_01long_01_4_01_4.html" title=" " alt="" coords="212,163,393,217"/>
+<area shape="poly" id="edge29_Node000000_Node000003" title=" " alt="" coords="177,210,211,204,212,209,178,216"/>
+<area shape="rect" id="Node000004" href="$structcstone_1_1unusedBits_3_01MortonKey_3_01unsigned_01long_01long_01_4_01_4.html" title=" " alt="" coords="212,241,393,296"/>
+<area shape="poly" id="edge30_Node000000_Node000004" title=" " alt="" coords="178,244,212,250,211,255,177,249"/>
+<area shape="rect" id="Node000005" href="$structcstone_1_1unusedBits_3_01unsigned_01long_01_4.html" title=" " alt="" coords="230,321,375,361"/>
+<area shape="poly" id="edge31_Node000000_Node000005" title=" " alt="" coords="128,255,213,305,244,318,241,323,211,310,125,260"/>
+<area shape="rect" id="Node000006" href="$structcstone_1_1unusedBits_3_01unsigned_01long_01long_01_4.html" title="number of unused leading zeros in a 64&#45;bit SFC code" alt="" coords="215,385,390,425"/>
+<area shape="poly" id="edge32_Node000000_Node000006" title=" " alt="" coords="109,260,153,316,182,345,213,370,235,382,232,387,211,375,178,349,149,320,105,263"/>
+</map>

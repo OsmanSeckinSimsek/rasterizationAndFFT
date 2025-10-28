@@ -80,3 +80,19 @@ endif()
 add_subdirectory(cstone)
 add_subdirectory(extern/io)
 add_subdirectory(main)
+
+# Documentation target (Doxygen)
+find_package(Doxygen)
+if(DOXYGEN_FOUND)
+    set(DOXYGEN_IN  ${CMAKE_SOURCE_DIR}/docs/Doxyfile)
+    set(DOXYGEN_OUT ${CMAKE_BINARY_DIR}/docs)
+
+    add_custom_target(docs
+        COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYGEN_IN}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/docs
+        COMMENT "Generating API documentation with Doxygen"
+        VERBATIM
+    )
+else()
+    message(STATUS "Doxygen not found. 'docs' target will be unavailable.")
+endif()
