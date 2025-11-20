@@ -510,9 +510,9 @@ public:
         // unsigned divisor      = std::pow(2, (21 - powerDim));
         unsigned divisor = 1 + std::pow(2, 21) / gridDim;
 
-        int meshCoordX_base = std::get<0>(mesh_indices) / divisor;
-        int meshCoordY_base = std::get<1>(mesh_indices) / divisor;
-        int meshCoordZ_base = std::get<2>(mesh_indices) / divisor;
+        int meshCoordX_base = util::get<0>(mesh_indices) / divisor;
+        int meshCoordY_base = util::get<1>(mesh_indices) / divisor;
+        int meshCoordZ_base = util::get<2>(mesh_indices) / divisor;
 
         // std::cout << "key: " << key << " mesh indices: " << meshCoordX_base << " " << meshCoordY_base << " " <<
         // meshCoordZ_base << std::endl;
@@ -550,3 +550,11 @@ private:
         }
     }
 };
+
+// Forward declaration for CUDA rasterization function
+#ifdef USE_CUDA
+template<typename T>
+void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
+                                      std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
+                                      int powerDim);
+#endif

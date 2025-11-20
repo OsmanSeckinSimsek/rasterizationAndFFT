@@ -99,7 +99,11 @@ int main(int argc, char** argv)
 
     timer.elapsed("Sync");
 
+#ifdef USE_CUDA
+    rasterize_particles_to_mesh_cuda(mesh, keys, x, y, z, vx, vy, vz, powerDim);
+#else
     mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
+#endif
 
     // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
     std::cout << "rasterized" << std::endl;
