@@ -1,4 +1,10 @@
 #include <algorithm>
+#include <cstring>
+
+#ifdef USE_NVSHMEM
+#include <nvshmem.h>
+#include <nvshmemx.h>
+#endif
 
 #include "mesh.hpp"
 #include "utils.hpp"
@@ -14,6 +20,17 @@ using MeshType = double;
 int main(int argc, char** argv)
 {
     auto [rank, numRanks] = initMpi();
+#ifdef USE_NVSHMEM
+    nvshmemx_init_attr_t nvshmem_attr;
+    std::memset(&nvshmem_attr, 0, sizeof(nvshmem_attr));
+    nvshmem_attr.mpi_comm = MPI_COMM_WORLD;
+    int nvshmem_status = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &nvshmem_attr);
+    if (nvshmem_status != 0)
+    {
+        std::cerr << "Failed to initialize NVSHMEM (" << nvshmem_status << ")" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, nvshmem_status);
+    }
+#endif
     const ArgParser parser(argc, (const char**)argv);
 
     if (parser.exists("-h") || parser.exists("--h") || parser.exists("-help") || parser.exists("--help"))
@@ -99,7 +116,9 @@ int main(int argc, char** argv)
 
     timer.elapsed("Sync");
 
-#ifdef USE_CUDA
+#ifdef USE_NVSHMEM
+    rasterize_particles_to_mesh_nvshmem(mesh, keys, x, y, z, vx, vy, vz, powerDim);
+#elif defined(USE_CUDA)
     rasterize_particles_to_mesh_cuda(mesh, keys, x, y, z, vx, vy, vz, powerDim);
 #else
     mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
@@ -124,7 +143,12 @@ int main(int argc, char** argv)
         file.close();
     }
 
-    return exitSuccess();
+    int exitCode = exitSuccess();
+#ifdef USE_NVSHMEM
+    nvshmem_barrier_all();
+    nvshmem_finalize();
+#endif
+    return exitCode;
 }
 
 void printSpectrumHelp(char* name, int rank)

@@ -1,6 +1,22 @@
 #include "mesh.hpp"
 #include <cuda_runtime.h>
+#include <type_traits>
 
+#ifdef USE_NVSHMEM
+#include <nvshmem.h>
+#include <nvshmemx.h>
+
+__device__ __forceinline__ double nvshmem_double_atomic_compare_swap(double* target, double compare, double value,
+                                                                     int pe)
+{
+    unsigned long long compare_bits = __double_as_longlong(compare);
+    unsigned long long value_bits   = __double_as_longlong(value);
+    unsigned long long prior_bits =
+        nvshmem_ulonglong_atomic_compare_swap(reinterpret_cast<unsigned long long*>(target), compare_bits, value_bits,
+                                              pe);
+    return __longlong_as_double(prior_bits);
+}
+#endif
 
 void checkCudaError(cudaError_t err, const char* msg)
 {
@@ -147,6 +163,44 @@ __global__ void updateMeshRecvKernel(uint64_t* indices, T* distances, T* vx, T* 
         meshVelZ[meshIndex] = vz[idx];
     }
 }
+
+#ifdef USE_NVSHMEM
+template<typename T>
+__global__ void fillValueKernel(T* data, uint64_t offset, uint64_t count, T value)
+{
+    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    data[offset + idx] = value;
+}
+
+__global__ void updateMeshRemoteNvshmemKernelDouble(const int* remoteRanks, const uint64_t* remoteIndices,
+                                                    const double* remoteDistances, const double* remoteVx,
+                                                    const double* remoteVy, const double* remoteVz, int remoteCount,
+                                                    double* meshVelX, double* meshVelY, double* meshVelZ,
+                                                    double* meshDistance)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= remoteCount) return;
+
+    int      target    = remoteRanks[idx];
+    uint64_t meshIndex = remoteIndices[idx];
+    double   distance  = remoteDistances[idx];
+
+    double prev = nvshmem_double_g(meshDistance + meshIndex, target);
+    while (distance < prev)
+    {
+        double prior = nvshmem_double_atomic_compare_swap(meshDistance + meshIndex, prev, distance, target);
+        if (prior == prev)
+        {
+            nvshmem_double_p(meshVelX + meshIndex, remoteVx[idx], target);
+            nvshmem_double_p(meshVelY + meshIndex, remoteVy[idx], target);
+            nvshmem_double_p(meshVelZ + meshIndex, remoteVz[idx], target);
+            break;
+        }
+        prev = prior;
+    }
+}
+#endif
 
 template<typename T>
 void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
@@ -488,7 +542,255 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     std::cout << "rank = " << mesh.rank_ << " rasterize (CUDA) done!" << std::endl;
 }
 
+#ifdef USE_NVSHMEM
+template<typename T>
+void rasterize_particles_to_mesh_nvshmem(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
+                                         std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
+                                         int powerDim)
+{
+    static_assert(std::is_same_v<T, double>, "NVSHMEM rasterization currently supports double precision.");
+
+    std::cout << "rank" << mesh.rank_ << " rasterize start (NVSHMEM) " << powerDim << std::endl;
+    std::cout << "rank" << mesh.rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+
+    const int pe     = nvshmem_my_pe();
+    const int npes   = nvshmem_n_pes();
+    if (npes != mesh.numRanks_)
+    {
+        std::cerr << "NVSHMEM communicator size (" << npes << ") does not match mesh communicator (" << mesh.numRanks_
+                  << ")." << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+    if (pe != mesh.rank_)
+    {
+        std::cerr << "NVSHMEM PE (" << pe << ") does not match mesh rank (" << mesh.rank_ << ")." << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
+    int      numParticles  = keys.size();
+    uint64_t inboxSize     = static_cast<uint64_t>(mesh.inbox_.size[0]) * mesh.inbox_.size[1] * mesh.inbox_.size[2];
+    uint64_t maxInboxSize  = 0;
+    uint64_t localInboxSz  = inboxSize;
+    MPI_Allreduce(&localInboxSz, &maxInboxSize, 1, MpiType<uint64_t>{}, MPI_MAX, MPI_COMM_WORLD);
+    if (maxInboxSize == 0) { return; }
+
+    // Input particle data
+    KeyType* d_keys;
+    T *      d_x, *d_y, *d_z, *d_vx, *d_vy, *d_vz;
+
+    // Mesh configuration
+    int *d_inboxLow, *d_inboxHigh, *d_inboxSize, *d_procGrid;
+
+    // Local assignment buffers
+    uint64_t* d_localIndices;
+    T *       d_localDistances, *d_localVx, *d_localVy, *d_localVz;
+    int*      d_localCount;
+
+    // Remote assignment buffers
+    int*      d_remoteRanks;
+    uint64_t* d_remoteIndices;
+    T *       d_remoteDistances, *d_remoteVx, *d_remoteVy, *d_remoteVz;
+    int*      d_remoteCount;
+
+    // Allocate device memory
+    checkCudaError(cudaMalloc(&d_keys, numParticles * sizeof(KeyType)), "Allocating d_keys");
+    checkCudaError(cudaMalloc(&d_x, numParticles * sizeof(T)), "Allocating d_x");
+    checkCudaError(cudaMalloc(&d_y, numParticles * sizeof(T)), "Allocating d_y");
+    checkCudaError(cudaMalloc(&d_z, numParticles * sizeof(T)), "Allocating d_z");
+    checkCudaError(cudaMalloc(&d_vx, numParticles * sizeof(T)), "Allocating d_vx");
+    checkCudaError(cudaMalloc(&d_vy, numParticles * sizeof(T)), "Allocating d_vy");
+    checkCudaError(cudaMalloc(&d_vz, numParticles * sizeof(T)), "Allocating d_vz");
+
+    checkCudaError(cudaMalloc(&d_inboxLow, 3 * sizeof(int)), "Allocating d_inboxLow");
+    checkCudaError(cudaMalloc(&d_inboxHigh, 3 * sizeof(int)), "Allocating d_inboxHigh");
+    checkCudaError(cudaMalloc(&d_inboxSize, 3 * sizeof(int)), "Allocating d_inboxSize");
+    checkCudaError(cudaMalloc(&d_procGrid, 3 * sizeof(int)), "Allocating d_procGrid");
+
+    checkCudaError(cudaMalloc(&d_localIndices, numParticles * sizeof(uint64_t)), "Allocating d_localIndices");
+    checkCudaError(cudaMalloc(&d_localDistances, numParticles * sizeof(T)), "Allocating d_localDistances");
+    checkCudaError(cudaMalloc(&d_localVx, numParticles * sizeof(T)), "Allocating d_localVx");
+    checkCudaError(cudaMalloc(&d_localVy, numParticles * sizeof(T)), "Allocating d_localVy");
+    checkCudaError(cudaMalloc(&d_localVz, numParticles * sizeof(T)), "Allocating d_localVz");
+    checkCudaError(cudaMalloc(&d_localCount, sizeof(int)), "Allocating d_localCount");
+
+    checkCudaError(cudaMalloc(&d_remoteRanks, numParticles * sizeof(int)), "Allocating d_remoteRanks");
+    checkCudaError(cudaMalloc(&d_remoteIndices, numParticles * sizeof(uint64_t)), "Allocating d_remoteIndices");
+    checkCudaError(cudaMalloc(&d_remoteDistances, numParticles * sizeof(T)), "Allocating d_remoteDistances");
+    checkCudaError(cudaMalloc(&d_remoteVx, numParticles * sizeof(T)), "Allocating d_remoteVx");
+    checkCudaError(cudaMalloc(&d_remoteVy, numParticles * sizeof(T)), "Allocating d_remoteVy");
+    checkCudaError(cudaMalloc(&d_remoteVz, numParticles * sizeof(T)), "Allocating d_remoteVz");
+    checkCudaError(cudaMalloc(&d_remoteCount, sizeof(int)), "Allocating d_remoteCount");
+
+    // NVSHMEM symmetric mesh storage
+    T* d_meshVelX = static_cast<T*>(nvshmem_malloc(maxInboxSize * sizeof(T)));
+    T* d_meshVelY = static_cast<T*>(nvshmem_malloc(maxInboxSize * sizeof(T)));
+    T* d_meshVelZ = static_cast<T*>(nvshmem_malloc(maxInboxSize * sizeof(T)));
+    T* d_meshDistance = static_cast<T*>(nvshmem_malloc(maxInboxSize * sizeof(T)));
+
+    if (!d_meshVelX || !d_meshVelY || !d_meshVelZ || !d_meshDistance)
+    {
+        std::cerr << "Failed to allocate NVSHMEM symmetric buffers of size " << maxInboxSize << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
+    // ========== Copy Data to Device ==========
+    checkCudaError(cudaMemcpy(d_keys, keys.data(), numParticles * sizeof(KeyType), cudaMemcpyHostToDevice),
+                    "Copying keys to device");
+    checkCudaError(cudaMemcpy(d_x, x.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying x to device");
+    checkCudaError(cudaMemcpy(d_y, y.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying y to device");
+    checkCudaError(cudaMemcpy(d_z, z.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying z to device");
+    checkCudaError(cudaMemcpy(d_vx, vx.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying vx to device");
+    checkCudaError(cudaMemcpy(d_vy, vy.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying vy to device");
+    checkCudaError(cudaMemcpy(d_vz, vz.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying vz to device");
+
+    std::array<int, 3> inboxLow     = {mesh.inbox_.low[0], mesh.inbox_.low[1], mesh.inbox_.low[2]};
+    std::array<int, 3> inboxHigh    = {mesh.inbox_.high[0], mesh.inbox_.high[1], mesh.inbox_.high[2]};
+    std::array<int, 3> inboxSizeArr = {mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]};
+    checkCudaError(cudaMemcpy(d_inboxLow, inboxLow.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying inbox low to device");
+    checkCudaError(cudaMemcpy(d_inboxHigh, inboxHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying inbox high to device");
+    checkCudaError(cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying inbox size to device");
+    checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying proc_grid to device");
+
+    int zeroCount = 0;
+    checkCudaError(cudaMemcpy(d_localCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
+                    "Initializing local count");
+    checkCudaError(cudaMemcpy(d_remoteCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
+                    "Initializing remote count");
+
+    checkCudaError(cudaMemcpy(d_meshVelX, mesh.velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying mesh velX to device");
+    checkCudaError(cudaMemcpy(d_meshVelY, mesh.velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying mesh velY to device");
+    checkCudaError(cudaMemcpy(d_meshVelZ, mesh.velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying mesh velZ to device");
+    checkCudaError(cudaMemcpy(d_meshDistance, mesh.distance_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
+                    "Copying mesh distance to device");
+
+    const int threadsPerBlock = 256;
+
+    if (maxInboxSize > inboxSize)
+    {
+        uint64_t tail = maxInboxSize - inboxSize;
+        checkCudaError(cudaMemset(d_meshVelX + inboxSize, 0, tail * sizeof(T)), "Zeroing mesh velX tail");
+        checkCudaError(cudaMemset(d_meshVelY + inboxSize, 0, tail * sizeof(T)), "Zeroing mesh velY tail");
+        checkCudaError(cudaMemset(d_meshVelZ + inboxSize, 0, tail * sizeof(T)), "Zeroing mesh velZ tail");
+        int fillBlocks = (tail + threadsPerBlock - 1) / threadsPerBlock;
+        fillValueKernel<T><<<fillBlocks, threadsPerBlock>>>(d_meshDistance, inboxSize, tail,
+                                                            std::numeric_limits<T>::infinity());
+        checkCudaError(cudaDeviceSynchronize(), "Initializing mesh distance tail");
+    }
+
+    int blocksPerGrid = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
+    classifyParticlesKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
+        d_keys, d_x, d_y, d_z, d_vx, d_vy, d_vz, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_, d_inboxLow, d_inboxHigh,
+        d_inboxSize, d_procGrid, mesh.rank_, d_localIndices, d_localDistances, d_localVx, d_localVy, d_localVz,
+        d_localCount, d_remoteRanks, d_remoteIndices, d_remoteDistances, d_remoteVx, d_remoteVy, d_remoteVz,
+        d_remoteCount);
+    checkCudaError(cudaDeviceSynchronize(), "Classification kernel execution");
+
+    int h_localCount, h_remoteCount;
+    checkCudaError(cudaMemcpy(&h_localCount, d_localCount, sizeof(int), cudaMemcpyDeviceToHost),
+                    "Copying local count to host");
+    checkCudaError(cudaMemcpy(&h_remoteCount, d_remoteCount, sizeof(int), cudaMemcpyDeviceToHost),
+                    "Copying remote count to host");
+
+    std::cout << "rank = " << mesh.rank_ << " local count = " << h_localCount << " remote count = " << h_remoteCount
+                << std::endl;
+
+    if (h_localCount > 0)
+    {
+        int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
+        updateMeshLocalKernel<T><<<localBlocks, threadsPerBlock>>>(d_localIndices, d_localDistances, d_localVx,
+                                                                  d_localVy, d_localVz, h_localCount, d_meshVelX,
+                                                                  d_meshVelY, d_meshVelZ, d_meshDistance);
+        checkCudaError(cudaDeviceSynchronize(), "Local mesh update kernel");
+    }
+
+    int maxRemoteCount = 0;
+    MPI_Allreduce(&h_remoteCount, &maxRemoteCount, 1, MpiType<int>{}, MPI_MAX, MPI_COMM_WORLD);
+
+    if (maxRemoteCount > 0)
+    {
+        int remoteBlocks = (maxRemoteCount + threadsPerBlock - 1) / threadsPerBlock;
+        void* kernelArgs[] = {&d_remoteRanks,     &d_remoteIndices, &d_remoteDistances, &d_remoteVx,
+                              &d_remoteVy,        &d_remoteVz,      &h_remoteCount,     &d_meshVelX,
+                              &d_meshVelY,        &d_meshVelZ,      &d_meshDistance};
+        nvshmemx_collective_launch((const void*)updateMeshRemoteNvshmemKernelDouble, dim3(remoteBlocks),
+                                   dim3(threadsPerBlock), kernelArgs, 0, 0);
+        checkCudaError(cudaDeviceSynchronize(), "NVSHMEM remote update kernel");
+    }
+
+    nvshmem_barrier_all();
+
+    checkCudaError(cudaMemcpy(mesh.velX_.data(), d_meshVelX, inboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                    "Copying mesh velX back to host");
+    checkCudaError(cudaMemcpy(mesh.velY_.data(), d_meshVelY, inboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                    "Copying mesh velY back to host");
+    checkCudaError(cudaMemcpy(mesh.velZ_.data(), d_meshVelZ, inboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                    "Copying mesh velZ back to host");
+    checkCudaError(cudaMemcpy(mesh.distance_.data(), d_meshDistance, inboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                    "Copying mesh distance back to host");
+
+    // Free device memory
+    cudaFree(d_keys);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_z);
+    cudaFree(d_vx);
+    cudaFree(d_vy);
+    cudaFree(d_vz);
+    cudaFree(d_inboxLow);
+    cudaFree(d_inboxHigh);
+    cudaFree(d_inboxSize);
+    cudaFree(d_procGrid);
+    cudaFree(d_localIndices);
+    cudaFree(d_localDistances);
+    cudaFree(d_localVx);
+    cudaFree(d_localVy);
+    cudaFree(d_localVz);
+    cudaFree(d_localCount);
+    cudaFree(d_remoteRanks);
+    cudaFree(d_remoteIndices);
+    cudaFree(d_remoteDistances);
+    cudaFree(d_remoteVx);
+    cudaFree(d_remoteVy);
+    cudaFree(d_remoteVz);
+    cudaFree(d_remoteCount);
+
+    nvshmem_free(d_meshVelX);
+    nvshmem_free(d_meshVelY);
+    nvshmem_free(d_meshVelZ);
+    nvshmem_free(d_meshDistance);
+
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        mesh.vdataSender[i].send_index.clear();
+        mesh.vdataSender[i].send_distance.clear();
+        mesh.vdataSender[i].send_vx.clear();
+        mesh.vdataSender[i].send_vy.clear();
+        mesh.vdataSender[i].send_vz.clear();
+        mesh.send_count[i] = 0;
+    }
+
+    mesh.extrapolateEmptyCellsFromNeighbors();
+    std::cout << "rank = " << mesh.rank_ << " rasterize (NVSHMEM) done!" << std::endl;
+}
+#endif
+
 // Explicit template instantiation for double
 template void rasterize_particles_to_mesh_cuda<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
                                                         std::vector<double>, std::vector<double>, std::vector<double>,
                                                         std::vector<double>, std::vector<double>, int);
+
+#ifdef USE_NVSHMEM
+template void rasterize_particles_to_mesh_nvshmem<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
+                                                          std::vector<double>, std::vector<double>, std::vector<double>,
+                                                          std::vector<double>, std::vector<double>, int);
+#endif

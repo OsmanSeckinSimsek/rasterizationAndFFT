@@ -558,3 +558,10 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
                                       std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
                                       int powerDim);
 #endif
+
+#ifdef USE_NVSHMEM
+template<typename T>
+void rasterize_particles_to_mesh_nvshmem(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
+                                         std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
+                                         int powerDim);
+#endif
