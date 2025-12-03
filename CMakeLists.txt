@@ -16,7 +16,9 @@ option(BUILD_TESTING "build unit and integration tests" ON)
 option(GPU_DIRECT "Enable CUDA-aware MPI communication" OFF)
 
 set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
-find_package(Heffte REQUIRED PATHS ${HEFFTE_PATH})
+# HeffteConfig.cmake is typically in <prefix>/lib/cmake/Heffte/ or <prefix>/share/Heffte/
+# So we need to search in the parent directory if HEFFTE_PATH points to the install root
+find_package(Heffte REQUIRED PATHS ${HEFFTE_PATH} ${HEFFTE_PATH}/lib/cmake ${HEFFTE_PATH}/share)
 
 # set(FFTW_PATH "$ENV{HOME}/lib_installed/fftw" CACHE PATH "Path to FFTW installation")
 set(CSTONE_DIR ${PROJECT_SOURCE_DIR}/cstone/include)

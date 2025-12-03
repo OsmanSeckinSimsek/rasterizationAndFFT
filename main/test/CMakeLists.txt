@@ -11,7 +11,16 @@ endif()
 
 function(addMpiTest source exename testname ranks)
     add_executable(${exename} ${source})
-    target_include_directories(${exename} PRIVATE ${MPI_CXX_INCLUDE_PATH} ${CSTONE_DIR} ${PROJECT_SOURCE_DIR}/main/src ${HEFFTE_PATH}/include ${FFTW3_INCLUDE_DIRS})
+    # Get include directories from the Heffte target if available, otherwise fall back to HEFFTE_PATH
+    if(TARGET Heffte::Heffte)
+        get_target_property(HEFFTE_INC_DIR Heffte::Heffte INTERFACE_INCLUDE_DIRECTORIES)
+        if(NOT HEFFTE_INC_DIR)
+            set(HEFFTE_INC_DIR "${HEFFTE_PATH}/include")
+        endif()
+    else()
+        set(HEFFTE_INC_DIR "${HEFFTE_PATH}/include")
+    endif()
+    target_include_directories(${exename} PRIVATE ${MPI_CXX_INCLUDE_PATH} ${CSTONE_DIR} ${PROJECT_SOURCE_DIR}/main/src ${HEFFTE_INC_DIR} ${FFTW3_INCLUDE_DIRS})
     target_compile_options(${exename} PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
     target_link_libraries(${exename} PRIVATE ${MPI_CXX_LIBRARIES} GTest::gtest_main Heffte::Heffte)
 
