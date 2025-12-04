@@ -50,20 +50,34 @@ if(CMAKE_CUDA_COMPILER)
     target_link_libraries(${exename}-cuda PRIVATE cstone_gpu io OpenMP::OpenMP_CXX ${MPI_CXX_LIBRARIES} CUDA::cudart Heffte::Heffte)
     if(RASTER_WITH_NVSHMEM)
         target_compile_definitions(${exename}-cuda PRIVATE USE_NVSHMEM)
+        # Accept NVSHMEM_HOME as CMake variable or environment variable
+        if(NOT NVSHMEM_HOME)
+            set(NVSHMEM_HOME $ENV{NVSHMEM_HOME})
+        endif()
+        # Search for NVSHMEM header
         find_path(NVSHMEM_INCLUDE_DIR
             NAMES nvshmem.h
-            HINTS $ENV{NVSHMEM_HOME}
+            HINTS ${NVSHMEM_HOME} $ENV{NVSHMEM_HOME}
+            PATHS /usr /usr/local
             PATH_SUFFIXES include include/nvshmem)
+        # Search for NVSHMEM host library
         find_library(NVSHMEM_HOST_LIB
             NAMES nvshmem_host
-            HINTS $ENV{NVSHMEM_HOME}
+            HINTS ${NVSHMEM_HOME} $ENV{NVSHMEM_HOME}
+            PATHS /usr /usr/local
             PATH_SUFFIXES lib lib64)
+        # Search for NVSHMEM device library
         find_library(NVSHMEM_DEVICE_LIB
             NAMES nvshmem_device
-            HINTS $ENV{NVSHMEM_HOME}
+            HINTS ${NVSHMEM_HOME} $ENV{NVSHMEM_HOME}
+            PATHS /usr /usr/local
             PATH_SUFFIXES lib lib64)
         if(NOT NVSHMEM_INCLUDE_DIR OR NOT NVSHMEM_HOST_LIB OR NOT NVSHMEM_DEVICE_LIB)
             message(FATAL_ERROR "NVSHMEM was requested but not all components were found. "
+                                "NVSHMEM_HOME=${NVSHMEM_HOME}\n"
+                                "NVSHMEM_INCLUDE_DIR=${NVSHMEM_INCLUDE_DIR}\n"
+                                "NVSHMEM_HOST_LIB=${NVSHMEM_HOST_LIB}\n"
+                                "NVSHMEM_DEVICE_LIB=${NVSHMEM_DEVICE_LIB}\n"
                                 "Set NVSHMEM_HOME or specify include/lib paths.")
         endif()
         target_include_directories(${exename}-cuda PUBLIC ${NVSHMEM_INCLUDE_DIR})
