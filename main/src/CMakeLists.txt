@@ -54,30 +54,80 @@ if(CMAKE_CUDA_COMPILER)
         if(NOT NVSHMEM_HOME)
             set(NVSHMEM_HOME $ENV{NVSHMEM_HOME})
         endif()
-        # Search for NVSHMEM header
+        message(STATUS "Searching for NVSHMEM with NVSHMEM_HOME=${NVSHMEM_HOME}")
+        # Search for NVSHMEM header - try multiple possible locations and names
         find_path(NVSHMEM_INCLUDE_DIR
-            NAMES nvshmem.h
+            NAMES nvshmem.h nvshmem/nvshmem.h
             HINTS ${NVSHMEM_HOME} $ENV{NVSHMEM_HOME}
-            PATHS /usr /usr/local
+            PATHS /usr /usr/local /opt/nvshmem
             PATH_SUFFIXES include include/nvshmem)
-        # Search for NVSHMEM host library
+        # Search for NVSHMEM host library - try multiple possible names
         find_library(NVSHMEM_HOST_LIB
-            NAMES nvshmem_host
+            NAMES nvshmem_host libnvshmem_host nvshmem_host_2.0 nvshmem_host_2.1 nvshmem_host_2.2
             HINTS ${NVSHMEM_HOME} $ENV{NVSHMEM_HOME}
-            PATHS /usr /usr/local
-            PATH_SUFFIXES lib lib64)
-        # Search for NVSHMEM device library
+            PATHS /usr /usr/local /opt/nvshmem
+            PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+        # Search for NVSHMEM device library - try multiple possible names
         find_library(NVSHMEM_DEVICE_LIB
-            NAMES nvshmem_device
+            NAMES nvshmem_device libnvshmem_device nvshmem_device_2.0 nvshmem_device_2.1 nvshmem_device_2.2
             HINTS ${NVSHMEM_HOME} $ENV{NVSHMEM_HOME}
-            PATHS /usr /usr/local
-            PATH_SUFFIXES lib lib64)
+            PATHS /usr /usr/local /opt/nvshmem
+            PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+        message(STATUS "NVSHMEM search results:")
+        message(STATUS "  NVSHMEM_INCLUDE_DIR=${NVSHMEM_INCLUDE_DIR}")
+        message(STATUS "  NVSHMEM_HOST_LIB=${NVSHMEM_HOST_LIB}")
+        message(STATUS "  NVSHMEM_DEVICE_LIB=${NVSHMEM_DEVICE_LIB}")
+        
+        # If not found, try to find any nvshmem libraries as fallback
+        if(NOT NVSHMEM_HOST_LIB)
+            foreach(search_path ${NVSHMEM_HOME} /usr /usr/local)
+                file(GLOB NVSHMEM_HOST_CANDIDATES 
+                    "${search_path}/lib/libnvshmem*host*"
+                    "${search_path}/lib64/libnvshmem*host*"
+                    "${search_path}/lib/x86_64-linux-gnu/libnvshmem*host*")
+                if(NVSHMEM_HOST_CANDIDATES)
+                    list(GET NVSHMEM_HOST_CANDIDATES 0 NVSHMEM_HOST_LIB)
+                    message(STATUS "  Found NVSHMEM_HOST_LIB via fallback: ${NVSHMEM_HOST_LIB}")
+                    break()
+                endif()
+            endforeach()
+        endif()
+        
+        if(NOT NVSHMEM_DEVICE_LIB)
+            foreach(search_path ${NVSHMEM_HOME} /usr /usr/local)
+                file(GLOB NVSHMEM_DEVICE_CANDIDATES 
+                    "${search_path}/lib/libnvshmem*device*"
+                    "${search_path}/lib64/libnvshmem*device*"
+                    "${search_path}/lib/x86_64-linux-gnu/libnvshmem*device*")
+                if(NVSHMEM_DEVICE_CANDIDATES)
+                    list(GET NVSHMEM_DEVICE_CANDIDATES 0 NVSHMEM_DEVICE_LIB)
+                    message(STATUS "  Found NVSHMEM_DEVICE_LIB via fallback: ${NVSHMEM_DEVICE_LIB}")
+                    break()
+                endif()
+            endforeach()
+        endif()
+        
+        if(NOT NVSHMEM_INCLUDE_DIR)
+            foreach(search_path ${NVSHMEM_HOME} /usr /usr/local)
+                if(EXISTS "${search_path}/include/nvshmem.h")
+                    set(NVSHMEM_INCLUDE_DIR "${search_path}/include")
+                    message(STATUS "  Found NVSHMEM_INCLUDE_DIR via fallback: ${NVSHMEM_INCLUDE_DIR}")
+                    break()
+                elseif(EXISTS "${search_path}/include/nvshmem/nvshmem.h")
+                    set(NVSHMEM_INCLUDE_DIR "${search_path}/include/nvshmem")
+                    message(STATUS "  Found NVSHMEM_INCLUDE_DIR via fallback: ${NVSHMEM_INCLUDE_DIR}")
+                    break()
+                endif()
+            endforeach()
+        endif()
+        
         if(NOT NVSHMEM_INCLUDE_DIR OR NOT NVSHMEM_HOST_LIB OR NOT NVSHMEM_DEVICE_LIB)
             message(FATAL_ERROR "NVSHMEM was requested but not all components were found. "
                                 "NVSHMEM_HOME=${NVSHMEM_HOME}\n"
                                 "NVSHMEM_INCLUDE_DIR=${NVSHMEM_INCLUDE_DIR}\n"
                                 "NVSHMEM_HOST_LIB=${NVSHMEM_HOST_LIB}\n"
                                 "NVSHMEM_DEVICE_LIB=${NVSHMEM_DEVICE_LIB}\n"
+                                "Please check the debug output above to see where NVSHMEM files are located.\n"
                                 "Set NVSHMEM_HOME or specify include/lib paths.")
         endif()
         target_include_directories(${exename}-cuda PUBLIC ${NVSHMEM_INCLUDE_DIR})
