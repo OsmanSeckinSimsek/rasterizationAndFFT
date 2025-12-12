@@ -133,6 +133,13 @@ if(CMAKE_CUDA_COMPILER)
         target_include_directories(${exename}-cuda PUBLIC ${NVSHMEM_INCLUDE_DIR})
         target_link_libraries(${exename}-cuda PRIVATE ${NVSHMEM_HOST_LIB} ${NVSHMEM_DEVICE_LIB})
         set_target_properties(${exename}-cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+        # Set RPATH so the binary can find NVSHMEM libraries at runtime
+        get_filename_component(NVSHMEM_LIB_DIR ${NVSHMEM_HOST_LIB} DIRECTORY)
+        set_target_properties(${exename}-cuda PROPERTIES
+            BUILD_RPATH "${NVSHMEM_LIB_DIR}"
+            INSTALL_RPATH "${NVSHMEM_LIB_DIR}"
+            BUILD_RPATH_USE_ORIGIN TRUE
+            INSTALL_RPATH_USE_LINK_PATH TRUE)
     endif()
     enableGpuDirect(${exename}-cuda)
     install(TARGETS ${exename}-cuda RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
