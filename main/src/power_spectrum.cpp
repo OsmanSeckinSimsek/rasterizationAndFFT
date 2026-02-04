@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #ifdef USE_NVSHMEM
 #include <nvshmem.h>
@@ -12,26 +13,81 @@
 #include "ifile_io_impl.h"
 #include "cstone/domain/domain.hpp"
 
+// Include CUDA runtime after MPI initialization to avoid conflicts
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 using namespace sphexa;
 
 void printSpectrumHelp(char* binName, int rank);
 using MeshType = double;
 
+enum class RasterBackend
+{
+    Cpu,
+    Cuda,
+    Nvshmem
+};
+
+RasterBackend selectBackend(const ArgParser& parser)
+{
+    std::string mode = "auto";
+    if (parser.exists("--backend"))
+    {
+        mode = parser.get("--backend");
+    }
+
+    if (mode == "cpu")
+        return RasterBackend::Cpu;
+    if (mode == "cuda" || mode == "gpudirect")
+        return RasterBackend::Cuda;
+    if (mode == "nvshmem")
+        return RasterBackend::Nvshmem;
+
+    // auto or unknown: prefer NVSHMEM if available, then CUDA, else CPU
+#ifdef USE_NVSHMEM
+    return RasterBackend::Nvshmem;
+#elif defined(USE_CUDA)
+    return RasterBackend::Cuda;
+#else
+    return RasterBackend::Cpu;
+#endif
+}
+
 int main(int argc, char** argv)
 {
+    // For CUDA builds, we need to ensure MPI is initialized before any CUDA operations
+    // The CUDA runtime might initialize automatically when libraries are loaded,
+    // so we initialize MPI first to avoid conflicts
     auto [rank, numRanks] = initMpi();
-#ifdef USE_NVSHMEM
-    nvshmemx_init_attr_t nvshmem_attr;
-    std::memset(&nvshmem_attr, 0, sizeof(nvshmem_attr));
-    nvshmem_attr.mpi_comm = MPI_COMM_WORLD;
-    int nvshmem_status = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &nvshmem_attr);
-    if (nvshmem_status != 0)
+    
+    const ArgParser       parser(argc, (const char**)argv);
+    RasterBackend         backend = selectBackend(parser);
+
+
+    if (backend == RasterBackend::Nvshmem)
     {
-        std::cerr << "Failed to initialize NVSHMEM (" << nvshmem_status << ")" << std::endl;
-        MPI_Abort(MPI_COMM_WORLD, nvshmem_status);
-    }
+#ifndef USE_NVSHMEM
+        if (rank == 0)
+        {
+            std::cerr << "NVSHMEM backend requested but this binary was built without NVSHMEM support."
+                      << " Reconfigure with -DRASTER_WITH_NVSHMEM=ON to enable it." << std::endl;
+        }
+        MPI_Finalize();
+        return EXIT_FAILURE;
+#else
+        nvshmemx_init_attr_t nvshmem_attr;
+        std::memset(&nvshmem_attr, 0, sizeof(nvshmem_attr));
+        nvshmem_attr.mpi_comm = MPI_COMM_WORLD;
+        int nvshmem_status    = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &nvshmem_attr);
+        if (nvshmem_status != 0)
+        {
+            std::cerr << "Failed to initialize NVSHMEM (" << nvshmem_status << ")" << std::endl;
+            MPI_Abort(MPI_COMM_WORLD, nvshmem_status);
+        }
 #endif
-    const ArgParser parser(argc, (const char**)argv);
+    }
 
     if (parser.exists("-h") || parser.exists("--h") || parser.exists("-help") || parser.exists("--help"))
     {
@@ -39,15 +95,38 @@ int main(int argc, char** argv)
         return exitSuccess();
     }
 
+    // Print selected backend
+    if (rank == 0)
+    {
+        std::string backendName;
+        switch (backend)
+        {
+            case RasterBackend::Cpu:
+                backendName = "CPU/MPI";
+                break;
+            case RasterBackend::Cuda:
+                backendName = "CUDA";
+#ifdef USE_GPU_DIRECT
+                backendName += " (GPU-Direct enabled)";
+#endif
+                break;
+            case RasterBackend::Nvshmem:
+                backendName = "NVSHMEM";
+                break;
+        }
+        std::cout << "Selected rasterization backend: " << backendName << std::endl;
+    }
+
     using KeyType        = uint64_t;
     using CoordinateType = double;
 
     using Domain = cstone::Domain<KeyType, CoordinateType, cstone::CpuTag>;
-
+    
     const std::string initFile           = parser.get("--checkpoint");
     int               stepNo             = parser.get("--stepNo", 0);
     float             meshSizeMultiplier = parser.get("--meshSizeMultiplier", 1.0);
     size_t            numShells          = parser.get("--numShells", 0);
+    std::string       interpolationMode  = parser.get<std::string>("--interpolation", "nearest"); // "nearest" or "sph"
 
     Timer timer(std::cout);
 
@@ -74,7 +153,7 @@ int main(int argc, char** argv)
     reader->readField("x", x.data());
     reader->readField("y", y.data());
     reader->readField("z", z.data());
-    // reader->readField("h", h.data());
+    reader->readField("h", h.data());
     reader->readField("vx", vx.data());
     reader->readField("vy", vy.data());
     reader->readField("vz", vz.data());
@@ -85,8 +164,8 @@ int main(int argc, char** argv)
     std::cout << "Read " << reader->localNumParticles() << " particles on rank " << rank << std::endl;
 
     // get the dimensions from the checkpoint
-    int powerDim = std::ceil(std::log(simDim) / std::log(2));
-    int gridDim  = simDim;                       // std::pow(2, powerDim);               // dimension of the mesh
+    int powerDim = std::ceil(std::log(simDim) / std::log(2)) + 1;
+    int gridDim  = std::pow(2, powerDim);  //simDim; // std::pow(2, powerDim); // dimension of the mesh
     if (numShells == 0) numShells = gridDim / 2; // default number of shells is half of the mesh dimension
 
     // init mesh, sim box -0.5 to 0.5 by default
@@ -106,7 +185,7 @@ int main(int argc, char** argv)
     std::cout << "rank = " << rank << " numLocalParticles after sync = " << domain.nParticles() << std::endl;
     std::cout << "rank = " << rank << " numLocalParticleswithHalos after sync = " << domain.nParticlesWithHalos()
               << std::endl;
-    std::cout << "rank = " << rank << " keys size after sync = " << keys.size() << std::endl;
+    // std::cout << "rank = " << rank << " keys size after sync = " << keys.size() << std::endl;
     // std::cout << "rank = " << rank << " keys.begin = " << *keys.begin() << " keys.end = " << *keys.end() <<
     // std::endl;
 
@@ -116,13 +195,56 @@ int main(int argc, char** argv)
 
     timer.elapsed("Sync");
 
-#ifdef USE_NVSHMEM
-    rasterize_particles_to_mesh_nvshmem(mesh, keys, x, y, z, vx, vy, vz, powerDim);
-#elif defined(USE_CUDA)
-    rasterize_particles_to_mesh_cuda(mesh, keys, x, y, z, vx, vy, vz, powerDim);
+    // Choose interpolation method
+    if (interpolationMode == "sph")
+    {
+        // Use SPH interpolation
+        if (rank == 0)
+        {
+            std::cout << "Using SPH interpolation" << std::endl;
+        }
+        if (backend == RasterBackend::Cuda)
+        {
+#ifdef USE_CUDA
+            rasterize_particles_to_mesh_sph_cuda(mesh, keys, x, y, z, vx, vy, vz, h, powerDim);
 #else
-    mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
+            mesh.rasterize_particles_to_mesh_sph(keys, x, y, z, vx, vy, vz, h, powerDim);
 #endif
+        }
+        else
+        {
+            mesh.rasterize_particles_to_mesh_sph(keys, x, y, z, vx, vy, vz, h, powerDim);
+        }
+    }
+    else
+    {
+        // Use nearest neighbor interpolation
+        if (rank == 0)
+        {
+            std::cout << "Using nearest neighbor interpolation" << std::endl;
+        }
+        if (backend == RasterBackend::Nvshmem)
+        {
+#ifdef USE_NVSHMEM
+            rasterize_particles_to_mesh_nvshmem(mesh, keys, x, y, z, vx, vy, vz, powerDim);
+#else
+            // Should be unreachable due to earlier check, but keep as safety.
+            mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
+#endif
+        }
+        else if (backend == RasterBackend::Cuda)
+        {
+#ifdef USE_CUDA
+            rasterize_particles_to_mesh_cuda(mesh, keys, x, y, z, vx, vy, vz, powerDim);
+#else
+            mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
+#endif
+        }
+        else
+        {
+            mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
+        }
+    }
 
     // mesh.rasterize_using_cornerstone(keys, x, y, z, vx, vy, vz, powerDim);
     std::cout << "rasterized" << std::endl;
@@ -145,8 +267,11 @@ int main(int argc, char** argv)
 
     int exitCode = exitSuccess();
 #ifdef USE_NVSHMEM
-    nvshmem_barrier_all();
-    nvshmem_finalize();
+    if (backend == RasterBackend::Nvshmem)
+    {
+        nvshmem_barrier_all();
+        nvshmem_finalize();
+    }
 #endif
     return exitCode;
 }
@@ -164,5 +289,8 @@ void printSpectrumHelp(char* name, int rank)
         printf("\t--meshSizeMultiplier \t\t Multiplier for the mesh size over the grid size.\n\n");
         printf("\t--numShells \t\t Number of shells for averaging. Default is half of mesh dimension read from the "
                "checkpoint data.\n\n");
+        printf("\t--backend \t\t Rasterization backend: 'cpu', 'cuda' (or 'gpudirect'), 'nvshmem',"
+               " or omit for automatic selection (prefers nvshmem, then cuda, then cpu).\n\n");
+        printf("\t--interpolation \t\t Interpolation method: 'nearest' (default) or 'sph' for SPH interpolation.\n\n");
     }
 }

@@ -1,10 +1,30 @@
 #include <vector>
 #include <limits>
 #include <numbers>
+#include <iostream>
+#include <cstdlib>
 #include "heffte.h"
 #include "cstone/domain/domain.hpp"
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include <complex>
+#endif
 
 using KeyType = uint64_t;
+
+#ifdef USE_CUDA
+// Forward declarations for CUDA kernel launchers
+template<typename T>
+void launchComputePowerSpectrumKernel(std::complex<T>* fftOutput, T* powerSpectrum, uint64_t size, T meshSize, int blocks, int threads);
+
+template<typename T>
+void launchComputeFreqVeloKernel(T* velX, T* velY, T* velZ, T* freqVelo, uint64_t size, int blocks, int threads);
+
+template<typename T>
+void launchSphericalAveragingKernel(T* freqVelo, T* k_values, T* k_1d, T* ps_rad, int* count,
+                                     int* inboxSize, int* inboxLow, int gridDim, int numShells,
+                                     dim3 gridSize, dim3 blockSize);
+#endif
 
 struct DataSender
 {
@@ -14,6 +34,16 @@ struct DataSender
     std::vector<double>   send_vx;
     std::vector<double>   send_vy;
     std::vector<double>   send_vz;
+};
+
+struct DataSenderSPH
+{
+    // vectors to send to each rank in all_to_allv for SPH interpolation
+    std::vector<uint64_t> send_index;
+    std::vector<double>   send_weight;
+    std::vector<double>   send_weighted_vx;
+    std::vector<double>   send_weighted_vy;
+    std::vector<double>   send_weighted_vz;
 };
 
 template<typename T>
@@ -39,6 +69,24 @@ public:
     std::vector<T> velZ_;
     // particle's distance to mesh point
     std::vector<T> distance_;
+    
+#ifdef USE_CUDA
+    // Device pointers for velocity arrays (kept on GPU after CUDA rasterization)
+    T* d_velX_ = nullptr;
+    T* d_velY_ = nullptr;
+    T* d_velZ_ = nullptr;
+    T* d_freqVelo_ = nullptr; // Device pointer for freqVelo (velX + velY + velZ)
+    bool gpuDataValid_ = false; // Flag to indicate if GPU data is valid
+    
+    // Cleanup function to free GPU memory
+    ~Mesh()
+    {
+        if (d_velX_) cudaFree(d_velX_);
+        if (d_velY_) cudaFree(d_velY_);
+        if (d_velZ_) cudaFree(d_velZ_);
+        if (d_freqVelo_) cudaFree(d_freqVelo_);
+    }
+#endif
     std::vector<T> power_spectrum_;
 
     // communication counters
@@ -63,6 +111,23 @@ public:
     std::vector<T>        recv_vx;
     std::vector<T>        recv_vy;
     std::vector<T>        recv_vz;
+
+    // SPH interpolation data structures
+    std::vector<DataSenderSPH> vdataSenderSPH;
+    std::vector<T>             weightSum_;      // sum of weights for each cell
+    std::vector<T>             weightedVelX_;   // weighted velocity sum for each cell
+    std::vector<T>             weightedVelY_;   // weighted velocity sum for each cell
+    std::vector<T>             weightedVelZ_;   // weighted velocity sum for each cell
+    std::vector<uint64_t>      send_index_sph;
+    std::vector<T>             send_weight;
+    std::vector<T>             send_weighted_vx;
+    std::vector<T>             send_weighted_vy;
+    std::vector<T>             send_weighted_vz;
+    std::vector<uint64_t>      recv_index_sph;
+    std::vector<T>             recv_weight;
+    std::vector<T>             recv_weighted_vx;
+    std::vector<T>             recv_weighted_vy;
+    std::vector<T>             recv_weighted_vz;
 
     // sim box -0.5 to 0.5 by default
     Mesh(int rank, int numRanks, int gridDim, int numShells)
@@ -89,6 +154,12 @@ public:
         // z_.resize(inbox_.size[2]);
         distance_.resize(inboxSize);
         power_spectrum_.resize(numShells);
+
+        // SPH interpolation arrays
+        weightSum_.resize(inboxSize, 0.0);
+        weightedVelX_.resize(inboxSize, 0.0);
+        weightedVelY_.resize(inboxSize, 0.0);
+        weightedVelZ_.resize(inboxSize, 0.0);
 
         resize_comm_size(numRanks);
         std::fill(distance_.begin(), distance_.end(), std::numeric_limits<T>::infinity());
@@ -199,9 +270,251 @@ public:
             vdataSender[i].send_vy.clear();
             vdataSender[i].send_vz.clear();
         }
+        vx.clear();
+        vy.clear();
+        vz.clear();
 
         // extrapolate mesh cells which doesn't have any particles assigned
         extrapolateEmptyCellsFromNeighbors();
+    }
+
+    // SPH interpolation rasterization function
+    void rasterize_particles_to_mesh_sph(std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y, std::vector<T> z,
+                                         std::vector<T> vx, std::vector<T> vy, std::vector<T> vz, std::vector<T> h,
+                                         int powerDim)
+    {
+        std::cout << "rank" << rank_ << " rasterize start (SPH) " << powerDim << std::endl;
+        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+
+        // Reset SPH accumulation arrays
+        uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
+                             static_cast<uint64_t>(inbox_.size[2]);
+        std::fill(weightSum_.begin(), weightSum_.end(), 0.0);
+        std::fill(weightedVelX_.begin(), weightedVelX_.end(), 0.0);
+        std::fill(weightedVelY_.begin(), weightedVelY_.end(), 0.0);
+        std::fill(weightedVelZ_.begin(), weightedVelZ_.end(), 0.0);
+        std::fill(send_count.begin(), send_count.end(), 0);
+
+        // Clear SPH sender data
+        for (int i = 0; i < numRanks_; i++)
+        {
+            vdataSenderSPH[i].send_index.clear();
+            vdataSenderSPH[i].send_weight.clear();
+            vdataSenderSPH[i].send_weighted_vx.clear();
+            vdataSenderSPH[i].send_weighted_vy.clear();
+            vdataSenderSPH[i].send_weighted_vz.clear();
+        }
+
+        T deltaMesh = (Lmax_ - Lmin_) / gridDim_;
+
+        int particleIndex = 0;
+        // iterate over keys vector
+        for (auto it = keys.begin(); it != keys.end(); ++it)
+        {
+            T px = x[particleIndex];
+            T py = y[particleIndex];
+            T pz = z[particleIndex];
+            T pvx = vx[particleIndex];
+            T pvy = vy[particleIndex];
+            T pvz = vz[particleIndex];
+            T ph = h[particleIndex];
+
+            // Use effective smoothing length: cap at cell size to reduce excessive smoothing
+            // This preserves more high-k power while still providing SPH interpolation
+            T h_eff = std::min(ph, deltaMesh);
+            
+            // Calculate the search radius (2 * effective smoothing length)
+            T searchRadius = 2.0 * h_eff;
+            T searchRadiusSq = searchRadius * searchRadius;
+
+            // Find the range of grid cells that could be within 2*h
+            // Convert particle position to grid indices
+            T cellSize = deltaMesh;
+            int minI = static_cast<int>((px - searchRadius - Lmin_) / cellSize);
+            int maxI = static_cast<int>((px + searchRadius - Lmin_) / cellSize) + 1;
+            int minJ = static_cast<int>((py - searchRadius - Lmin_) / cellSize);
+            int maxJ = static_cast<int>((py + searchRadius - Lmin_) / cellSize) + 1;
+            int minK = static_cast<int>((pz - searchRadius - Lmin_) / cellSize);
+            int maxK = static_cast<int>((pz + searchRadius - Lmin_) / cellSize) + 1;
+
+            // Clamp to valid grid range
+            minI = std::max(0, minI);
+            maxI = std::min(gridDim_, maxI);
+            minJ = std::max(0, minJ);
+            maxJ = std::min(gridDim_, maxJ);
+            minK = std::max(0, minK);
+            maxK = std::min(gridDim_, maxK);
+
+            // Iterate over potential cells
+            for (int i = minI; i < maxI; i++)
+            {
+                for (int j = minJ; j < maxJ; j++)
+                {
+                    for (int k = minK; k < maxK; k++)
+                    {
+                        // Calculate distance from particle to cell center
+                        T cellX = getCellCenterX(i);
+                        T cellY = getCellCenterY(j);
+                        T cellZ = getCellCenterZ(k);
+
+                        T dx = px - cellX;
+                        T dy = py - cellY;
+                        T dz = pz - cellZ;
+                        T distSq = dx * dx + dy * dy + dz * dz;
+
+                        // Check if within search radius
+                        if (distSq < searchRadiusSq)
+                        {
+                            T dist = std::sqrt(distSq);
+                            // Use effective smoothing length for kernel evaluation
+                            T weight = sphKernel(dist, h_eff);
+
+                            if (weight > 0.0)
+                            {
+                                // Calculate weighted velocity contribution
+                                T weightedVx = pvx * weight;
+                                T weightedVy = pvy * weight;
+                                T weightedVz = pvz * weight;
+
+                                assignVelocityByMeshCoordSPH(i, j, k, weight, weightedVx, weightedVy, weightedVz);
+                            }
+                        }
+                    }
+                }
+            }
+
+            particleIndex++;
+        }
+
+        x.clear();
+        y.clear();
+        z.clear();
+        h.clear();
+
+        std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
+        for (int i = 0; i < numRanks_; i++)
+            std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
+
+        // MPI communication for SPH data
+        MPI_Alltoall(send_count.data(), 1, MpiType<int>{}, recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            send_disp[i + 1] = send_disp[i] + send_count[i];
+            recv_disp[i + 1] = recv_disp[i] + recv_count[i];
+        }
+
+        // Prepare send buffers for SPH
+        send_index_sph.resize(send_disp[numRanks_]);
+        send_weight.resize(send_disp[numRanks_]);
+        send_weighted_vx.resize(send_disp[numRanks_]);
+        send_weighted_vy.resize(send_disp[numRanks_]);
+        send_weighted_vz.resize(send_disp[numRanks_]);
+        std::cout << "rank = " << rank_ << " buffers allocated" << std::endl;
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            for (int j = send_disp[i]; j < send_disp[i + 1]; j++)
+            {
+                int localIdx = j - send_disp[i];
+                send_index_sph[j] = vdataSenderSPH[i].send_index[localIdx];
+                send_weight[j] = vdataSenderSPH[i].send_weight[localIdx];
+                send_weighted_vx[j] = vdataSenderSPH[i].send_weighted_vx[localIdx];
+                send_weighted_vy[j] = vdataSenderSPH[i].send_weighted_vy[localIdx];
+                send_weighted_vz[j] = vdataSenderSPH[i].send_weighted_vz[localIdx];
+            }
+        }
+        std::cout << "rank = " << rank_ << " buffers transformed" << std::endl;
+
+        // Prepare receive buffers
+        recv_index_sph.resize(recv_disp[numRanks_]);
+        recv_weight.resize(recv_disp[numRanks_]);
+        recv_weighted_vx.resize(recv_disp[numRanks_]);
+        recv_weighted_vy.resize(recv_disp[numRanks_]);
+        recv_weighted_vz.resize(recv_disp[numRanks_]);
+
+        MPI_Alltoallv(send_index_sph.data(), send_count.data(), send_disp.data(), MpiType<uint64_t>{}, recv_index_sph.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_weight.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_weight.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_weighted_vx.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_weighted_vx.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_weighted_vy.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_weighted_vy.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_weighted_vz.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_weighted_vz.data(),
+                      recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        std::cout << "rank = " << rank_ << " alltoallv done!" << std::endl;
+
+        // Accumulate received contributions
+        for (int i = 0; i < recv_disp[numRanks_]; i++)
+        {
+            uint64_t index = recv_index_sph[i];
+            weightSum_[index] += recv_weight[i];
+            weightedVelX_[index] += recv_weighted_vx[i];
+            weightedVelY_[index] += recv_weighted_vy[i];
+            weightedVelZ_[index] += recv_weighted_vz[i];
+        }
+
+        // Clear the vectors
+        for (int i = 0; i < numRanks_; i++)
+        {
+            vdataSenderSPH[i].send_index.clear();
+            vdataSenderSPH[i].send_weight.clear();
+            vdataSenderSPH[i].send_weighted_vx.clear();
+            vdataSenderSPH[i].send_weighted_vy.clear();
+            vdataSenderSPH[i].send_weighted_vz.clear();
+        }
+        vx.clear();
+        vy.clear();
+        vz.clear();
+
+        // Normalize velocities by dividing by weight sum
+#pragma omp parallel for
+        for (uint64_t i = 0; i < inboxSize; i++)
+        {
+            if (weightSum_[i] > 0.0)
+            {
+                velX_[i] = weightedVelX_[i] / weightSum_[i];
+                velY_[i] = weightedVelY_[i] / weightSum_[i];
+                velZ_[i] = weightedVelZ_[i] / weightSum_[i];
+            }
+        }
+
+        // extrapolate mesh cells which doesn't have any particles assigned
+        // extrapolateEmptyCellsFromNeighbors();
+    }
+
+    void assignVelocityByMeshCoordSPH(int meshx, int meshy, int meshz, T weight, T weightedVx, T weightedVy, T weightedVz)
+    {
+        int      targetRank  = calculateRankFromMeshCoord(meshx, meshy, meshz);
+        uint64_t targetIndex = calculateInboxIndexFromMeshCoord(meshx, meshy, meshz);
+
+        if (targetRank == rank_)
+        {
+            // if the corresponding mesh cell belongs to this rank
+            uint64_t index = targetIndex;
+            if (index >= weightSum_.size())
+            {
+                std::cout << "rank = " << rank_ << " index = " << index << " size " << weightSum_.size() << std::endl;
+            }
+            else
+            {
+                weightSum_[index] += weight;
+                weightedVelX_[index] += weightedVx;
+                weightedVelY_[index] += weightedVy;
+                weightedVelZ_[index] += weightedVz;
+            }
+        }
+        else
+        {
+            // if the corresponding mesh cell belongs another rank
+            send_count[targetRank]++;
+            vdataSenderSPH[targetRank].send_index.push_back(targetIndex);
+            vdataSenderSPH[targetRank].send_weight.push_back(weight);
+            vdataSenderSPH[targetRank].send_weighted_vx.push_back(weightedVx);
+            vdataSenderSPH[targetRank].send_weighted_vy.push_back(weightedVy);
+            vdataSenderSPH[targetRank].send_weighted_vz.push_back(weightedVz);
+        }
     }
 
     void assignVelocityByMeshCoord(int meshx, int meshy, int meshz, T distance, T velox, T veloy, T veloz)
@@ -322,10 +635,87 @@ public:
         uint64_t        meshSize = 1;
         meshSize                 = meshSize * gridDim_ * gridDim_ * gridDim_;
 
+#ifdef USE_CUDA
+        // Use CUDA backend for GPU cases
+        heffte::plan_options options = heffte::default_options<heffte::backend::cufft>();
+        options.use_pencils          = true;
+
+        heffte::fft3d<heffte::backend::cufft> fft(inbox_, outbox, MPI_COMM_WORLD, options);
+
+        // Use existing GPU data if available (from CUDA rasterization), otherwise allocate and copy
+        uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
+        T* d_velX, *d_velY, *d_velZ;
+        std::complex<T>* d_output;
+        
+        cudaError_t err;
+        
+        if (gpuDataValid_ && d_velX_ && d_velY_ && d_velZ_)
+        {
+            // Reuse existing GPU data from rasterization
+            d_velX = d_velX_;
+            d_velY = d_velY_;
+            d_velZ = d_velZ_;
+        }
+        else
+        {
+            // Allocate and copy from host (CPU rasterization case)
+            err = cudaMalloc(&d_velX, inboxSize * sizeof(T));
+            if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMalloc(&d_velY, inboxSize * sizeof(T));
+            if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMalloc(&d_velZ, inboxSize * sizeof(T));
+            if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            
+            err = cudaMemcpy(d_velX, velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(d_velY, velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(d_velZ, velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        }
+        
+        err = cudaMalloc(&d_output, fft.size_outbox() * sizeof(std::complex<T>));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_output: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+
+        // Perform FFT on device and compute power spectrum on GPU
+        int threadsPerBlock = 256;
+        int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
+        
+        T meshSizeT = static_cast<T>(meshSize); // Convert to T type for kernel
+        
+        fft.forward(d_velX, d_output);
+        launchComputePowerSpectrumKernel(d_output, d_velX, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        fft.forward(d_velY, d_output);
+        launchComputePowerSpectrumKernel(d_output, d_velY, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        fft.forward(d_velZ, d_output);
+        launchComputePowerSpectrumKernel(d_output, d_velZ, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        // Update device pointers if they were allocated here
+        if (!gpuDataValid_ || !d_velX_ || !d_velY_ || !d_velZ_)
+        {
+            if (d_velX_) cudaFree(d_velX_);
+            if (d_velY_) cudaFree(d_velY_);
+            if (d_velZ_) cudaFree(d_velZ_);
+            d_velX_ = d_velX;
+            d_velY_ = d_velY;
+            d_velZ_ = d_velZ;
+            gpuDataValid_ = true;
+        }
+        
+        cudaFree(d_output);
+#else
+        // Use FFTW backend for CPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::fftw>();
         options.use_pencils          = true;
 
-        // change fftw depending on the configuration into cufft or rocmfft
         heffte::fft3d<heffte::backend::fftw> fft(inbox_, outbox, MPI_COMM_WORLD, options);
 
         std::vector<std::complex<T>> output(fft.size_outbox());
@@ -357,6 +747,7 @@ public:
             T out    = abs(output.at(i)) / meshSize;
             velZ_[i] = out * out;
         }
+#endif
     }
 
     // Implemented following numpy.fft.fftfreq
@@ -385,6 +776,128 @@ public:
             }
         }
     }
+
+#ifdef USE_CUDA
+    // GPU version of spherical averaging
+    void perform_spherical_averaging_gpu()
+    {
+        std::cout << "rank = " << rank_ << " spherical averaging started (GPU)." << std::endl;
+        
+        uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
+        
+        // Allocate device memory for freqVelo if not already allocated
+        if (!d_freqVelo_)
+        {
+            cudaError_t err = cudaMalloc(&d_freqVelo_, inboxSize * sizeof(T));
+            if (err != cudaSuccess)
+            {
+                std::cerr << "CUDA Error allocating d_freqVelo_: " << cudaGetErrorString(err) << std::endl;
+                std::exit(EXIT_FAILURE);
+            }
+        }
+        
+        // Compute freqVelo = velX + velY + velZ on GPU
+        int threadsPerBlock = 256;
+        int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
+        launchComputeFreqVeloKernel(d_velX_, d_velY_, d_velZ_, d_freqVelo_, inboxSize, blocksPerGrid, threadsPerBlock);
+        
+        // Prepare k_values and k_1d on host (small arrays)
+        std::vector<T> k_values(gridDim_);
+        std::vector<T> k_1d(gridDim_);
+        fftfreq(k_values, gridDim_, 1.0 / gridDim_);
+        for (int i = 0; i < gridDim_; i++)
+        {
+            k_1d[i] = std::abs(k_values[i]);
+        }
+        
+        // Allocate device memory for k arrays and accumulation arrays
+        T* d_k_values, *d_k_1d, *d_ps_rad;
+        int* d_count, *d_inboxSize, *d_inboxLow;
+        
+        cudaError_t err;
+        err = cudaMalloc(&d_k_values, gridDim_ * sizeof(T));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_k_values: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMalloc(&d_k_1d, gridDim_ * sizeof(T));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_k_1d: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMalloc(&d_ps_rad, numShells_ * sizeof(T));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_ps_rad: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMalloc(&d_count, numShells_ * sizeof(int));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_count: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMalloc(&d_inboxSize, 3 * sizeof(int));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_inboxSize: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMalloc(&d_inboxLow, 3 * sizeof(int));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_inboxLow: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        // Copy data to device
+        err = cudaMemcpy(d_k_values, k_values.data(), gridDim_ * sizeof(T), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { std::cerr << "CUDA Error copying k_values: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMemcpy(d_k_1d, k_1d.data(), gridDim_ * sizeof(T), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { std::cerr << "CUDA Error copying k_1d: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        std::array<int, 3> inboxSizeArr = {inbox_.size[0], inbox_.size[1], inbox_.size[2]};
+        std::array<int, 3> inboxLowArr = {inbox_.low[0], inbox_.low[1], inbox_.low[2]};
+        err = cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { std::cerr << "CUDA Error copying inboxSize: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMemcpy(d_inboxLow, inboxLowArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) { std::cerr << "CUDA Error copying inboxLow: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        // Initialize accumulation arrays
+        err = cudaMemset(d_ps_rad, 0, numShells_ * sizeof(T));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error memset d_ps_rad: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMemset(d_count, 0, numShells_ * sizeof(int));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error memset d_count: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        // Launch spherical averaging kernel
+        dim3 blockSize(8, 8, 8);
+        dim3 gridSize((inbox_.size[0] + blockSize.x - 1) / blockSize.x,
+                      (inbox_.size[1] + blockSize.y - 1) / blockSize.y,
+                      (inbox_.size[2] + blockSize.z - 1) / blockSize.z);
+        launchSphericalAveragingKernel(d_freqVelo_, d_k_values, d_k_1d, d_ps_rad, d_count,
+                                       d_inboxSize, d_inboxLow, gridDim_, numShells_,
+                                       gridSize, blockSize);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing spherical averaging: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        // Copy results back to host
+        std::vector<T> ps_rad(numShells_);
+        std::vector<int> count(numShells_);
+        err = cudaMemcpy(ps_rad.data(), d_ps_rad, numShells_ * sizeof(T), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) { std::cerr << "CUDA Error copying ps_rad: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMemcpy(count.data(), d_count, numShells_ * sizeof(int), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) { std::cerr << "CUDA Error copying count: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        
+        // MPI reduction and normalization (same as CPU version)
+        std::vector<int> counts(numShells_, 0);
+        MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(count.data(), counts.data(), numShells_, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        
+        // Normalize the power spectrum
+        if (rank_ == 0)
+        {
+            T sum_ps_radial = std::accumulate(power_spectrum_.begin(), power_spectrum_.end(), 0.0);
+            std::cout << "sum_ps_radial: " << sum_ps_radial << std::endl;
+            
+#pragma omp parallel for
+            for (int i = 0; i < numShells_; i++)
+            {
+                if (counts[i] != 0)
+                    power_spectrum_[i] =
+                        (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i], 2)) / counts[i];
+            }
+        }
+        
+        // Free device memory
+        cudaFree(d_k_values);
+        cudaFree(d_k_1d);
+        cudaFree(d_ps_rad);
+        cudaFree(d_count);
+        cudaFree(d_inboxSize);
+        cudaFree(d_inboxLow);
+    }
+#endif
 
     // The normalized power spectrum results will be stored in rank 0
     void perform_spherical_averaging(T* ps)
@@ -472,6 +985,7 @@ public:
         recv_count.resize(size, 0);
 
         vdataSender.resize(size);
+        vdataSenderSPH.resize(size);
     }
 
     T calculateDistance(T x, T y, T z, int i, int j, int k)
@@ -480,6 +994,51 @@ public:
         T yDistance = std::pow(y - x_[j], 2);
         T zDistance = std::pow(z - x_[k], 2);
         return std::sqrt(xDistance + yDistance + zDistance);
+    }
+
+    // Get cell center coordinates for a given global mesh index
+    T getCellCenterX(int i) const
+    {
+        T deltaMesh     = (Lmax_ - Lmin_) / gridDim_;
+        T centerCoord   = deltaMesh / 2;
+        T startingCoord = Lmin_ + centerCoord;
+        return startingCoord + deltaMesh * i;
+    }
+
+    T getCellCenterY(int j) const
+    {
+        return getCellCenterX(j); // same calculation for y and z
+    }
+
+    T getCellCenterZ(int k) const
+    {
+        return getCellCenterX(k); // same calculation for y and z
+    }
+
+    // SPH cubic spline kernel (Monaghan 1992)
+    // Returns the kernel weight W(r, h) where r is distance and h is smoothing length
+    // The kernel is normalized and has compact support: W(r, h) = 0 for r >= 2*h
+    T sphKernel(T r, T h) const
+    {
+        if (h <= 0.0) return 0.0;
+        
+        T q = r / h;
+        if (q >= 2.0) return 0.0;
+
+        T sigma = 1.0 / (std::numbers::pi * h * h * h); // normalization constant for 3D
+        T factor = 0.0;
+
+        if (q < 1.0)
+        {
+            factor = 1.0 - 1.5 * q * q + 0.75 * q * q * q;
+        }
+        else // 1.0 <= q < 2.0
+        {
+            T term = 2.0 - q;
+            factor = 0.25 * term * term * term;
+        }
+
+        return sigma * factor;
     }
 
     inline int calculateRankFromMeshCoord(int i, int j, int k)
@@ -557,6 +1116,10 @@ template<typename T>
 void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
                                       std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
                                       int powerDim);
+template<typename T>
+void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
+                                          std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
+                                          std::vector<T> h, int powerDim);
 #endif
 
 #ifdef USE_NVSHMEM

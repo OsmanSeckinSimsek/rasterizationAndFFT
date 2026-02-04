@@ -13,7 +13,8 @@ list(APPEND CMAKE_MODULE_PATH
 )
 
 option(BUILD_TESTING "build unit and integration tests" ON)
-option(GPU_DIRECT "Enable CUDA-aware MPI communication" OFF)
+option(GPU_DIRECT "Enable CUDA-aware MPI communication" ON)
+option(RASTER_WITH_NVSHMEM "Enable NVSHMEM-based rasterization path" OFF)
 
 set(HEFFTE_PATH "$ENV{HOME}/lib_installed/heffte" CACHE PATH "Path to HeFFTe installation")
 # HeffteConfig.cmake is typically in <prefix>/lib/cmake/Heffte/ or <prefix>/share/Heffte/

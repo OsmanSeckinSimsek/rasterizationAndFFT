@@ -38,7 +38,12 @@ public:
             {
                 return strIsIntegral(*itr) ? T(std::stoi(*itr)) : T(std::stod(*itr));
             }
-            else { return std::string(*itr); }
+            else
+            {
+                // For non-arithmetic types, rely on implicit construction from std::string.
+                // This works for std::string and avoids returning a std::string when T is not compatible.
+                return T(*itr);
+            }
         }
         return def;
     }
