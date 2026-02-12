@@ -1,0 +1,25 @@
+var searchData=
+[
+  ['gather_0',['gather',['../namespacecstone.html#a6fc44a01e05969aefa3493a1cc38755f',1,'cstone']]],
+  ['gatherarrays_1',['gatherArrays',['../namespacecstone.html#afce198b4b6ced8fd1a9f4344cc1a4bd5',1,'cstone']]],
+  ['gatherfunc_2',['gatherFunc',['../classcstone_1_1SfcSorter.html#a8a0d9a872cafd9f61e783899713c7c42',1,'cstone::SfcSorter']]],
+  ['gathergpu_3',['gatherGpu',['../namespacecstone.html#a297a9d4fedfb90e8f3e614a666fb2fb0',1,'cstone']]],
+  ['gatherranges_4',['gatherRanges',['../namespacecstone.html#ab864d92d59ef7c63c43621a4817fa427',1,'cstone']]],
+  ['geocentersacc_5',['geoCentersAcc',['../classcstone_1_1FocusedOctree.html#ae0d41dfdd50f2544d88c3970db1262a0',1,'cstone::FocusedOctree']]],
+  ['geosizesacc_6',['geoSizesAcc',['../classcstone_1_1FocusedOctree.html#a20486725345b1200bc7b047312824a31',1,'cstone::FocusedOctree']]],
+  ['get_7',['get',['../namespacecstone.html#a93b0f927e7ec08b1d4df35c12a3c5c37',1,'cstone::get()'],['../namespaceutil.html#ad5ad7309e712d76b3ab13632c3efa59d',1,'util::get(Tuple &amp;&amp;tuple)'],['../namespaceutil.html#ac3473f842c64f19fca1c8501c0daf477',1,'util::get(T &amp;&amp;tup) noexcept'],['../namespaceutil.html#abd750f1278376f75f3b3249ddfa57073',1,'util::get(const array&lt; T, N &gt; &amp;&amp;a_)'],['../namespaceutil.html#a5da974871b8cccc6c5dca07f97e4d4a4',1,'util::get(array&lt; T, N &gt; &amp;&amp;a_)'],['../namespaceutil.html#a1fe16a8435fe2a8700935975651d3cad',1,'util::get(const array&lt; T, N &gt; &amp;a_)'],['../namespaceutil.html#ae1e884d9a8bd1a660309343808ffe087',1,'util::get(array&lt; T, N &gt; &amp;a_)'],['../namespacecstone.html#ad8b29471446ed343fcb2545e6aa4f1d3',1,'cstone::get()'],['../classsphexa_1_1ArgParser.html#a9a4b62a24c3c175178c2461ea6d53106',1,'sphexa::ArgParser::get(const std::string &amp;option, T def=T{}) const']]],
+  ['getcommalist_8',['getCommaList',['../classsphexa_1_1ArgParser.html#a063deb5452fa2a45bbf84f5556b49ca9',1,'sphexa::ArgParser']]],
+  ['getdevice_9',['getDevice',['../namespacecstone.html#ab1770c737077f5f1c3d66ed6e4e62a63',1,'cstone']]],
+  ['getfieldindex_10',['getFieldIndex',['../namespacecstone.html#a5e6a279c9f3ff35f7e544e43df2fbecc',1,'cstone']]],
+  ['getfields_11',['getFields',['../namespacecstone.html#ad6363d74bcfa471820a465ae60754ffe',1,'cstone']]],
+  ['gethost_12',['getHost',['../namespacecstone.html#ab25df0d24626d6a364cadd70014387b4',1,'cstone']]],
+  ['getlevelrangecpu_13',['getLevelRangeCpu',['../namespacecstone.html#abd20c14b8f8bc227c4c0181a4a0bf9fa',1,'cstone']]],
+  ['getmap_14',['getMap',['../classcstone_1_1SfcSorter.html#a16b41f32e26252c502ac2a683a68b80f',1,'cstone::SfcSorter']]],
+  ['getpointers_15',['getPointers',['../namespacecstone.html#a6435851940ec611425cb49b4d59960df',1,'cstone']]],
+  ['globalassignment_16',['GlobalAssignment',['../classcstone_1_1GlobalAssignment.html#a53e5c0982b87fecc86b07310f06cb1dd',1,'cstone::GlobalAssignment']]],
+  ['globalexpansioncenters_17',['globalExpansionCenters',['../classcstone_1_1FocusedOctree.html#a3f5e8db5e8894dbb1d21788081c0a734',1,'cstone::FocusedOctree']]],
+  ['globalfocusexchange_18',['globalFocusExchange',['../namespacecstone.html#a26b72eeeddc9b4ff6d9e66b5551d93a4',1,'cstone']]],
+  ['globalnumparticles_19',['globalnumparticles',['../classsphexa_1_1UnimplementedReader.html#acda261f9e07948a939295d54a3bf77d6',1,'sphexa::UnimplementedReader::globalNumParticles()'],['../classsphexa_1_1IFileReader.html#a967b4534ac2ca79f9c3bc8503d267460',1,'sphexa::IFileReader::globalNumParticles()']]],
+  ['globaltree_20',['globalTree',['../classcstone_1_1Domain.html#a106b7520b2754c4380f93f4fa64f4c0c',1,'cstone::Domain']]],
+  ['gsl_5fdisable_5fmsvc_5fwarnings_21',['gsl_DISABLE_MSVC_WARNINGS',['../gsl-lite_8hpp.html#a1d45a1daa685948b296d3b70c50677ad',1,'gsl-lite.hpp']]]
+];

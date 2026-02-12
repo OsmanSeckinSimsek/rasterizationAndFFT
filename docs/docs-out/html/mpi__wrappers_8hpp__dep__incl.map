@@ -1,0 +1,36 @@
+<map id="mpi_wrappers.hpp" name="mpi_wrappers.hpp">
+<area shape="rect" id="Node000001" title="A few C++ wrappers for MPI C functions." alt="" coords="423,5,565,31"/>
+<area shape="rect" id="Node000002" href="$box__mpi_8hpp.html" title="compute global minima and maxima of array ranges" alt="" coords="363,79,470,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="473,42,431,80,428,76,470,38"/>
+<area shape="rect" id="Node000008" href="$domaindecomp__mpi_8hpp.html" title="Exchange particles between different ranks to satisfy their assignments of the global octree." alt="" coords="5,79,188,104"/>
+<area shape="poly" id="edge9_Node000001_Node000008" title=" " alt="" coords="417,36,161,81,161,76,416,30"/>
+<area shape="rect" id="Node000009" href="$exchange__focus_8hpp.html" title="Request counts for a locally present node structure of a remote domain from a remote rank." alt="" coords="494,79,649,104"/>
+<area shape="poly" id="edge11_Node000001_Node000009" title=" " alt="" coords="518,38,560,76,557,80,515,42"/>
+<area shape="rect" id="Node000011" href="$exchange__halos_8hpp.html" title="Halo particle exchange with MPI point&#45;to&#45;point communication." alt="" coords="673,79,827,104"/>
+<area shape="poly" id="edge14_Node000001_Node000011" title=" " alt="" coords="549,32,709,76,708,81,547,37"/>
+<area shape="rect" id="Node000013" href="$exchange__keys_8hpp.html" title="Send/receive SFC key ranges to let peer ranks know which particles to send as halos." alt="" coords="788,152,939,177"/>
+<area shape="poly" id="edge17_Node000001_Node000013" title=" " alt="" coords="579,21,652,28,729,38,796,54,822,65,841,77,854,94,862,115,866,151,861,152,857,116,850,97,838,81,820,69,795,59,728,44,652,33,579,26"/>
+<area shape="rect" id="Node000014" href="$update__mpi_8hpp.html" title="MPI extension for calculating distributed cornerstone octrees." alt="" coords="212,79,339,104"/>
+<area shape="poly" id="edge19_Node000001_Node000014" title=" " alt="" coords="447,37,312,81,310,76,445,32"/>
+<area shape="rect" id="Node000003" href="$assignment_8hpp.html" title="Implementation of global particle assignment and distribution." alt="" coords="249,152,376,177"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="390,114,331,154,328,150,387,110"/>
+<area shape="rect" id="Node000004" href="$domain_8hpp.html" title="A domain class to manage distributed particles and their halos." alt="" coords="522,225,621,251"/>
+<area shape="poly" id="edge8_Node000002_Node000004" title=" " alt="" coords="432,114,452,145,478,175,514,203,549,223,546,228,511,207,475,179,448,148,427,117"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="368,178,530,223,529,228,367,183"/>
+<area shape="rect" id="Node000005" href="$domain__minimal_8cpp.html" title=" " alt="" coords="345,299,504,324"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="537,259,450,301,448,296,535,254"/>
+<area shape="rect" id="Node000006" href="$mesh_8hpp.html" title=" " alt="" coords="528,299,615,324"/>
+<area shape="poly" id="edge5_Node000004_Node000006" title=" " alt="" coords="574,264,574,299,569,299,569,264"/>
+<area shape="rect" id="Node000007" href="$power__spectrum_8cpp.html" title=" " alt="" coords="533,372,690,397"/>
+<area shape="poly" id="edge7_Node000004_Node000007" title=" " alt="" coords="599,258,616,276,628,298,632,318,631,339,620,373,614,371,625,338,627,318,624,300,612,279,595,262"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="587,335,607,371,603,373,582,338"/>
+<area shape="poly" id="edge10_Node000008_Node000003" title=" " alt="" coords="145,106,279,149,277,154,144,111"/>
+<area shape="rect" id="Node000010" href="$octree__focus__mpi_8hpp.html" title="Traits and functors for the MPI&#45;enabled FocusedOctree." alt="" coords="489,152,654,177"/>
+<area shape="poly" id="edge12_Node000009_Node000010" title=" " alt="" coords="574,118,574,152,569,152,569,118"/>
+<area shape="poly" id="edge13_Node000010_Node000004" title=" " alt="" coords="574,191,574,225,569,225,569,191"/>
+<area shape="rect" id="Node000012" href="$halos_8hpp.html" title="Implementation of halo discovery and halo exchange." alt="" coords="678,152,763,177"/>
+<area shape="poly" id="edge15_Node000011_Node000012" title=" " alt="" coords="742,118,728,153,723,151,737,116"/>
+<area shape="poly" id="edge16_Node000012_Node000004" title=" " alt="" coords="686,186,597,228,595,223,683,181"/>
+<area shape="poly" id="edge18_Node000013_Node000004" title=" " alt="" coords="804,183,619,228,618,223,803,178"/>
+<area shape="poly" id="edge20_Node000014_Node000003" title=" " alt="" coords="290,115,309,151,304,153,285,117"/>
+</map>

@@ -1,0 +1,36 @@
+<map id="field_get.hpp" name="field_get.hpp">
+<area shape="rect" id="Node000001" title="Utility functions to use compile&#45;time strings as arguments to get on tuples." alt="" coords="447,5,553,31"/>
+<area shape="rect" id="Node000002" href="$data__util_8hpp.html" title="Utility functions to resolve names of particle fields to pointers." alt="" coords="233,79,370,119"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="472,33,363,76,361,71,470,28"/>
+<area shape="rect" id="Node000011" href="$accel__switch_8hpp.html" title="Traits classes to manage GPU device acceleration behavior." alt="" coords="675,86,885,111"/>
+<area shape="poly" id="edge11_Node000001_Node000011" title=" " alt="" coords="541,28,727,80,725,85,540,33"/>
+<area shape="rect" id="Node000012" href="$constexpr__string_8hpp.html" title="Constexpr string based on C++20 structural types." alt="" coords="421,79,579,119"/>
+<area shape="poly" id="edge13_Node000001_Node000012" title=" " alt="" coords="503,31,503,65,497,65,497,31"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="301,167,363,192"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="311,118,325,153,320,155,306,120"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="209,167,277,192"/>
+<area shape="poly" id="edge3_Node000002_Node000004" title=" " alt="" coords="289,120,262,157,258,154,285,117"/>
+<area shape="rect" id="Node000005" href="$type__list_8hpp.html" title=" " alt="" coords="5,167,184,192"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="253,121,139,164,137,159,251,116"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="21,240,91,265"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="91,194,71,229,66,227,86,191"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="374,240,429,265"/>
+<area shape="poly" id="edge6_Node000005_Node000007" title=" " alt="" coords="146,189,355,237,361,239,360,244,354,243,145,195"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="411,313,503,339"/>
+<area shape="poly" id="edge7_Node000005_Node000008" title=" " alt="" coords="151,190,228,209,310,238,365,266,428,304,425,308,362,271,308,242,226,214,150,195"/>
+<area shape="rect" id="Node000009" href="$stl_8hpp.html" title="Functionality that exist in std::, but cannot be used in device code." alt="" coords="115,240,298,265"/>
+<area shape="poly" id="edge8_Node000005_Node000009" title=" " alt="" coords="114,190,178,230,175,235,111,194"/>
+<area shape="poly" id="edge9_Node000009_Node000008" title=" " alt="" coords="248,263,404,307,403,312,246,268"/>
+<area shape="rect" id="Node000010" href="$annotation_8hpp.html" title="Defines macros for enabling device code compilation." alt="" coords="105,313,308,339"/>
+<area shape="poly" id="edge10_Node000009_Node000010" title=" " alt="" coords="209,266,209,300,204,300,204,266"/>
+<area shape="poly" id="edge12_Node000011_Node000008" title=" " alt="" coords="789,111,803,149,805,172,797,193,770,225,738,252,702,273,663,290,586,312,518,323,517,318,585,307,661,285,699,268,735,247,766,222,792,191,799,171,798,150,784,113"/>
+<area shape="poly" id="edge19_Node000012_Node000003" title=" " alt="" coords="461,121,370,163,368,158,459,116"/>
+<area shape="poly" id="edge16_Node000012_Node000007" title=" " alt="" coords="475,121,450,142,429,168,415,198,408,227,403,226,410,196,424,165,446,138,471,117"/>
+<area shape="poly" id="edge17_Node000012_Node000008" title=" " alt="" coords="509,118,515,153,515,192,496,253,473,302,468,300,491,251,509,192,510,153,503,119"/>
+<area shape="rect" id="Node000013" title=" " alt="" coords="575,167,660,192"/>
+<area shape="poly" id="edge14_Node000012_Node000013" title=" " alt="" coords="530,117,590,157,587,161,527,121"/>
+<area shape="rect" id="Node000014" title=" " alt="" coords="685,167,782,192"/>
+<area shape="poly" id="edge15_Node000012_Node000014" title=" " alt="" coords="557,116,687,160,685,165,555,121"/>
+<area shape="rect" id="Node000015" title=" " alt="" coords="439,167,499,192"/>
+<area shape="poly" id="edge18_Node000012_Node000015" title=" " alt="" coords="495,120,481,155,476,153,490,118"/>
+</map>
