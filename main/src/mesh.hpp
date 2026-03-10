@@ -934,14 +934,8 @@ public:
                     T              kdist     = std::sqrt(k_values[k_index_i] * k_values[k_index_i] +
                                                          k_values[k_index_j] * k_values[k_index_j] +
                                                          k_values[k_index_k] * k_values[k_index_k]);
-                    std::vector<T> k_dif(gridDim_);
-
-                    for (int kind = 0; kind < gridDim_; kind++)
-                    {
-                        k_dif[kind] = std::abs(k_1d[kind] - kdist);
-                    }
-                    auto     it      = std::min_element(std::begin(k_dif), std::end(k_dif));
-                    uint64_t k_index = std::distance(std::begin(k_dif), it);
+                    uint64_t k_index = std::min(static_cast<uint64_t>(std::round(kdist)),
+                                                static_cast<uint64_t>(numShells_ - 1));
 
 #pragma omp atomic
                     ps_rad[k_index] += ps[freq_index];
@@ -964,7 +958,7 @@ public:
 #pragma omp parallel for
             for (int i = 0; i < numShells_; i++)
             {
-                if (count[i] != 0)
+                if (counts[i] != 0)
                     power_spectrum_[i] =
                         (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i], 2)) / counts[i];
             }
@@ -990,9 +984,14 @@ public:
 
     T calculateDistance(T x, T y, T z, int i, int j, int k)
     {
-        T xDistance = std::pow(x - x_[i], 2);
-        T yDistance = std::pow(y - x_[j], 2);
-        T zDistance = std::pow(z - x_[k], 2);
+        T deltaMesh = (Lmax_ - Lmin_) / gridDim_;
+        T cellX     = Lmin_ + (i + 0.5) * deltaMesh;
+        T cellY     = Lmin_ + (j + 0.5) * deltaMesh;
+        T cellZ     = Lmin_ + (k + 0.5) * deltaMesh;
+
+        T xDistance = std::pow(x - cellX, 2);
+        T yDistance = std::pow(y - cellY, 2);
+        T zDistance = std::pow(z - cellZ, 2);
         return std::sqrt(xDistance + yDistance + zDistance);
     }
 
