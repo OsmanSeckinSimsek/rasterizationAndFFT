@@ -1,3 +1,5 @@
+#pragma once
+
 #include <vector>
 #include <limits>
 #include <numbers>
@@ -24,6 +26,12 @@ template<typename T>
 void launchSphericalAveragingKernel(T* freqVelo, T* k_values, T* k_1d, T* ps_rad, int* count,
                                      int* inboxSize, int* inboxLow, int gridDim, int numShells,
                                      dim3 gridSize, dim3 blockSize);
+
+template<typename T>
+void launchExtrapolateEmptyCellsKernel(const T* srcVelX, const T* srcVelY, const T* srcVelZ,
+                                        T* velX, T* velY, T* velZ,
+                                        const T* distance, const int* inboxSize_d,
+                                        int sx, int sy, int sz);
 #endif
 
 struct DataSender
@@ -44,6 +52,15 @@ struct DataSenderSPH
     std::vector<double>   send_weighted_vx;
     std::vector<double>   send_weighted_vy;
     std::vector<double>   send_weighted_vz;
+};
+
+struct DataSenderCellAvg
+{
+    // vectors to send to each rank in all_to_allv for cell-average interpolation
+    std::vector<uint64_t> send_index;
+    std::vector<double>   send_vx;
+    std::vector<double>   send_vy;
+    std::vector<double>   send_vz;
 };
 
 template<typename T>
@@ -76,8 +93,9 @@ public:
     T* d_velY_ = nullptr;
     T* d_velZ_ = nullptr;
     T* d_freqVelo_ = nullptr; // Device pointer for freqVelo (velX + velY + velZ)
+    T* d_distance_ = nullptr; // Device pointer for distance/fill sentinel array
     bool gpuDataValid_ = false; // Flag to indicate if GPU data is valid
-    
+
     // Cleanup function to free GPU memory
     ~Mesh()
     {
@@ -85,6 +103,7 @@ public:
         if (d_velY_) cudaFree(d_velY_);
         if (d_velZ_) cudaFree(d_velZ_);
         if (d_freqVelo_) cudaFree(d_freqVelo_);
+        if (d_distance_) cudaFree(d_distance_);
     }
 #endif
     std::vector<T> power_spectrum_;
@@ -98,7 +117,7 @@ public:
 
     std::vector<DataSender> vdataSender;
 
-    // vectors to receive from each rank in all_to_allv
+    // flattened send buffers assembled from vdataSender before all_to_allv
     std::vector<uint64_t> send_index;
     std::vector<T>        send_distance;
     std::vector<T>        send_vx;
@@ -128,6 +147,21 @@ public:
     std::vector<T>             recv_weighted_vx;
     std::vector<T>             recv_weighted_vy;
     std::vector<T>             recv_weighted_vz;
+
+    // Cell-average interpolation data structures
+    std::vector<DataSenderCellAvg> vdataSenderCellAvg;
+    std::vector<T>                 cellAvgVelX_;  // velocity sum per cell
+    std::vector<T>                 cellAvgVelY_;
+    std::vector<T>                 cellAvgVelZ_;
+    std::vector<int>               cellCount_;    // particle count per cell
+    std::vector<uint64_t>          send_index_cavg;
+    std::vector<T>                 send_vx_cavg;
+    std::vector<T>                 send_vy_cavg;
+    std::vector<T>                 send_vz_cavg;
+    std::vector<uint64_t>          recv_index_cavg;
+    std::vector<T>                 recv_vx_cavg;
+    std::vector<T>                 recv_vy_cavg;
+    std::vector<T>                 recv_vz_cavg;
 
     // sim box -0.5 to 0.5 by default
     Mesh(int rank, int numRanks, int gridDim, int numShells)
@@ -161,6 +195,12 @@ public:
         weightedVelY_.resize(inboxSize, 0.0);
         weightedVelZ_.resize(inboxSize, 0.0);
 
+        // Cell-average interpolation arrays
+        cellAvgVelX_.resize(inboxSize, 0.0);
+        cellAvgVelY_.resize(inboxSize, 0.0);
+        cellAvgVelZ_.resize(inboxSize, 0.0);
+        cellCount_.resize(inboxSize, 0);
+
         resize_comm_size(numRanks);
         std::fill(distance_.begin(), distance_.end(), std::numeric_limits<T>::infinity());
 
@@ -168,11 +208,12 @@ public:
         setCoordinates(Lmin_, Lmax_);
     }
 
-    void rasterize_particles_to_mesh(std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y, std::vector<T> z,
-                                     std::vector<T> vx, std::vector<T> vy, std::vector<T> vz, int powerDim)
+    void rasterize_particles_to_mesh(const std::vector<KeyType>& keys, const std::vector<T>& x, const std::vector<T>& y,
+                                     const std::vector<T>& z, const std::vector<T>& vx, const std::vector<T>& vy,
+                                     const std::vector<T>& vz, int powerDim)
     {
         std::cout << "rank" << rank_ << " rasterize start " << powerDim << std::endl;
-        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
 
         int particleIndex = 0;
         // iterate over keys vector
@@ -193,9 +234,6 @@ public:
                                       vz[particleIndex]);
             particleIndex++;
         }
-        x.clear();
-        y.clear();
-        z.clear();
 
         std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
         for (int i = 0; i < numRanks_; i++)
@@ -270,21 +308,19 @@ public:
             vdataSender[i].send_vy.clear();
             vdataSender[i].send_vz.clear();
         }
-        vx.clear();
-        vy.clear();
-        vz.clear();
 
         // extrapolate mesh cells which doesn't have any particles assigned
         extrapolateEmptyCellsFromNeighbors();
     }
 
     // SPH interpolation rasterization function
-    void rasterize_particles_to_mesh_sph(std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y, std::vector<T> z,
-                                         std::vector<T> vx, std::vector<T> vy, std::vector<T> vz, std::vector<T> h,
+    void rasterize_particles_to_mesh_sph(const std::vector<KeyType>& keys, const std::vector<T>& x,
+                                         const std::vector<T>& y, const std::vector<T>& z, const std::vector<T>& vx,
+                                         const std::vector<T>& vy, const std::vector<T>& vz, const std::vector<T>& h,
                                          int powerDim)
     {
         std::cout << "rank" << rank_ << " rasterize start (SPH) " << powerDim << std::endl;
-        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
 
         // Reset SPH accumulation arrays
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
@@ -386,11 +422,6 @@ public:
             particleIndex++;
         }
 
-        x.clear();
-        y.clear();
-        z.clear();
-        h.clear();
-
         std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
         for (int i = 0; i < numRanks_; i++)
             std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
@@ -464,9 +495,6 @@ public:
             vdataSenderSPH[i].send_weighted_vy.clear();
             vdataSenderSPH[i].send_weighted_vz.clear();
         }
-        vx.clear();
-        vy.clear();
-        vz.clear();
 
         // Normalize velocities by dividing by weight sum
 #pragma omp parallel for
@@ -555,6 +583,12 @@ public:
     {
         std::cout << "rank = " << rank_ << " extrapolate cells" << std::endl;
 
+        // Read from immutable snapshots so parallel threads don't see each
+        // other's writes when sampling neighbors.
+        const std::vector<T> srcVelX = velX_;
+        const std::vector<T> srcVelY = velY_;
+        const std::vector<T> srcVelZ = velZ_;
+
 #pragma omp parallel for collapse(3)
         for (int i = 0; i < inbox_.size[2]; i++)
         {
@@ -587,9 +621,9 @@ public:
                                         assert(neighborIndex < inbox_.size[0] * inbox_.size[1] * inbox_.size[2]);
                                         if (distance_[neighborIndex] != std::numeric_limits<T>::infinity())
                                         {
-                                            velXSum += velX_[neighborIndex];
-                                            velYSum += velY_[neighborIndex];
-                                            velZSum += velZ_[neighborIndex];
+                                            velXSum += srcVelX[neighborIndex];
+                                            velYSum += srcVelY[neighborIndex];
+                                            velZSum += srcVelZ[neighborIndex];
                                             count++;
                                         }
                                     }
@@ -614,16 +648,25 @@ public:
         // returns the velocity field square
         calculate_fft();
 
+#ifdef USE_CUDA
+        // GPU path: d_velX_/Y_/Z_ hold per-component power spectrum after FFT;
+        // perform spherical averaging entirely on device, copy only the small
+        // power-spectrum result arrays to host at the end.
+        perform_spherical_averaging_gpu();
+        gpuDataValid_ = false;
+        std::cout << "done." << std::endl;
+        return;
+#endif
+
+        // CPU path
         std::vector<T> freqVelo(velX_.size());
 
-// calculate the modulus of the velocity frequencies
 #pragma omp parallel for
         for (uint64_t i = 0; i < velX_.size(); i++)
         {
             freqVelo[i] = velX_[i] + velY_[i] + velZ_[i];
         }
 
-        // perform spherical averaging
         perform_spherical_averaging(freqVelo.data());
         std::cout << "done." << std::endl;
     }
@@ -638,9 +681,14 @@ public:
 #ifdef USE_CUDA
         // Use CUDA backend for GPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::cufft>();
-        options.use_pencils          = true;
+        options.use_pencils          = false;
 
         heffte::fft3d<heffte::backend::cufft> fft(inbox_, outbox, MPI_COMM_WORLD, options);
+
+        std::cout << "rank=" << rank_
+                  << " heFFTe outbox=" << fft.size_outbox()
+                  << " workspace=" << fft.size_workspace()
+                  << " (" << (fft.size_workspace() * sizeof(std::complex<T>) >> 20) << " MB GPU)" << std::endl;
 
         // Use existing GPU data if available (from CUDA rasterization), otherwise allocate and copy
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
@@ -698,7 +746,9 @@ public:
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         
-        // Update device pointers if they were allocated here
+        // Keep per-component power spectrum on device for GPU spherical averaging.
+        // If d_velX/Y/Z were locally allocated (CPU rasterization path), transfer
+        // ownership to the persistent mesh device pointers.
         if (!gpuDataValid_ || !d_velX_ || !d_velY_ || !d_velZ_)
         {
             if (d_velX_) cudaFree(d_velX_);
@@ -707,16 +757,22 @@ public:
             d_velX_ = d_velX;
             d_velY_ = d_velY;
             d_velZ_ = d_velZ;
-            gpuDataValid_ = true;
         }
-        
+        // d_velX_/Y_/Z_ now hold per-component |FFT|²/N² values; keep for spherical averaging.
+        gpuDataValid_ = true;
+
         cudaFree(d_output);
 #else
         // Use FFTW backend for CPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::fftw>();
-        options.use_pencils          = true;
+        options.use_pencils          = false; // slabs need fewer redistribution stages → ~3× less workspace
 
         heffte::fft3d<heffte::backend::fftw> fft(inbox_, outbox, MPI_COMM_WORLD, options);
+
+        std::cout << "rank=" << rank_
+                  << " heFFTe outbox=" << fft.size_outbox()
+                  << " workspace=" << fft.size_workspace()
+                  << " (" << (fft.size_workspace() * sizeof(std::complex<T>) >> 20) << " MB host)" << std::endl;
 
         std::vector<std::complex<T>> output(fft.size_outbox());
 
@@ -857,10 +913,7 @@ public:
                                        gridSize, blockSize);
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing spherical averaging: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         // Copy results back to host
         std::vector<T> ps_rad(numShells_);
         std::vector<int> count(numShells_);
@@ -871,7 +924,7 @@ public:
         
         // MPI reduction and normalization (same as CPU version)
         std::vector<int> counts(numShells_, 0);
-        MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MpiType<T>{}, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(count.data(), counts.data(), numShells_, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
         
         // Normalize the power spectrum
@@ -906,8 +959,8 @@ public:
         std::vector<T>   k_values(gridDim_);
         std::vector<T>   k_1d(gridDim_);
         std::vector<T>   ps_rad(numShells_);
-        std::vector<int> count(k_1d.size());
-        std::vector<int> counts(k_1d.size(), 0);
+        std::vector<int> count(numShells_, 0);
+        std::vector<int> counts(numShells_, 0);
 
         fftfreq(k_values, gridDim_, 1.0 / gridDim_);
 
@@ -945,7 +998,7 @@ public:
             }
         }
 
-        MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MpiType<T>{}, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(count.data(), counts.data(), numShells_, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
         // normalize the power spectrum
@@ -965,6 +1018,132 @@ public:
         }
     }
 
+    void rasterize_particles_to_mesh_cell_avg(const std::vector<KeyType>& keys, const std::vector<T>& x,
+                                               const std::vector<T>& y, const std::vector<T>& z,
+                                               const std::vector<T>& vx, const std::vector<T>& vy,
+                                               const std::vector<T>& vz, int powerDim)
+    {
+        std::cout << "rank" << rank_ << " rasterize start (cell_avg) " << powerDim << std::endl;
+        std::cout << "rank" << rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
+
+        uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
+                             static_cast<uint64_t>(inbox_.size[2]);
+
+        // Reset accumulators and communication state
+        std::fill(cellAvgVelX_.begin(), cellAvgVelX_.end(), T(0));
+        std::fill(cellAvgVelY_.begin(), cellAvgVelY_.end(), T(0));
+        std::fill(cellAvgVelZ_.begin(), cellAvgVelZ_.end(), T(0));
+        std::fill(cellCount_.begin(), cellCount_.end(), 0);
+        std::fill(send_count.begin(), send_count.end(), 0);
+        std::fill(send_disp.begin(), send_disp.end(), 0);
+        std::fill(recv_disp.begin(), recv_disp.end(), 0);
+
+        int particleIndex = 0;
+        for (auto it = keys.begin(); it != keys.end(); ++it)
+        {
+            auto crd    = calculateKeyIndices(*it, gridDim_);
+            int  indexi = std::get<0>(crd);
+            int  indexj = std::get<1>(crd);
+            int  indexk = std::get<2>(crd);
+
+            int      targetRank  = calculateRankFromMeshCoord(indexi, indexj, indexk);
+            uint64_t targetIndex = calculateInboxIndexFromMeshCoord(indexi, indexj, indexk);
+
+            if (targetRank == rank_)
+            {
+                cellAvgVelX_[targetIndex] += vx[particleIndex];
+                cellAvgVelY_[targetIndex] += vy[particleIndex];
+                cellAvgVelZ_[targetIndex] += vz[particleIndex];
+                cellCount_[targetIndex]++;
+            }
+            else
+            {
+                send_count[targetRank]++;
+                vdataSenderCellAvg[targetRank].send_index.push_back(targetIndex);
+                vdataSenderCellAvg[targetRank].send_vx.push_back(vx[particleIndex]);
+                vdataSenderCellAvg[targetRank].send_vy.push_back(vy[particleIndex]);
+                vdataSenderCellAvg[targetRank].send_vz.push_back(vz[particleIndex]);
+            }
+            particleIndex++;
+        }
+
+        MPI_Alltoall(send_count.data(), 1, MpiType<int>{}, recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            send_disp[i + 1] = send_disp[i] + send_count[i];
+            recv_disp[i + 1] = recv_disp[i] + recv_count[i];
+        }
+
+        // Pack flattened send buffers
+        send_index_cavg.resize(send_disp[numRanks_]);
+        send_vx_cavg.resize(send_disp[numRanks_]);
+        send_vy_cavg.resize(send_disp[numRanks_]);
+        send_vz_cavg.resize(send_disp[numRanks_]);
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            for (int j = send_disp[i]; j < send_disp[i + 1]; j++)
+            {
+                int local = j - send_disp[i];
+                send_index_cavg[j] = vdataSenderCellAvg[i].send_index[local];
+                send_vx_cavg[j]    = vdataSenderCellAvg[i].send_vx[local];
+                send_vy_cavg[j]    = vdataSenderCellAvg[i].send_vy[local];
+                send_vz_cavg[j]    = vdataSenderCellAvg[i].send_vz[local];
+            }
+        }
+
+        recv_index_cavg.resize(recv_disp[numRanks_]);
+        recv_vx_cavg.resize(recv_disp[numRanks_]);
+        recv_vy_cavg.resize(recv_disp[numRanks_]);
+        recv_vz_cavg.resize(recv_disp[numRanks_]);
+
+        MPI_Alltoallv(send_index_cavg.data(), send_count.data(), send_disp.data(), MpiType<uint64_t>{},
+                      recv_index_cavg.data(), recv_count.data(), recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_vx_cavg.data(), send_count.data(), send_disp.data(), MpiType<T>{},
+                      recv_vx_cavg.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_vy_cavg.data(), send_count.data(), send_disp.data(), MpiType<T>{},
+                      recv_vy_cavg.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_vz_cavg.data(), send_count.data(), send_disp.data(), MpiType<T>{},
+                      recv_vz_cavg.data(), recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+        // Accumulate remote contributions
+        for (int i = 0; i < recv_disp[numRanks_]; i++)
+        {
+            uint64_t index = recv_index_cavg[i];
+            cellAvgVelX_[index] += recv_vx_cavg[i];
+            cellAvgVelY_[index] += recv_vy_cavg[i];
+            cellAvgVelZ_[index] += recv_vz_cavg[i];
+            cellCount_[index]++;
+        }
+
+        // Finalise: write averages into velX_/Y_/Z_; mark filled/empty for extrapolation
+        std::fill(distance_.begin(), distance_.end(), std::numeric_limits<T>::infinity());
+        for (uint64_t i = 0; i < inboxSize; i++)
+        {
+            if (cellCount_[i] > 0)
+            {
+                velX_[i]     = cellAvgVelX_[i] / static_cast<T>(cellCount_[i]);
+                velY_[i]     = cellAvgVelY_[i] / static_cast<T>(cellCount_[i]);
+                velZ_[i]     = cellAvgVelZ_[i] / static_cast<T>(cellCount_[i]);
+                distance_[i] = T(0); // finite sentinel → cell is filled
+            }
+            // else: velX_/Y_/Z_ remains 0, distance_ remains infinity → will be extrapolated
+        }
+
+        // Clear send buffers
+        for (int i = 0; i < numRanks_; i++)
+        {
+            vdataSenderCellAvg[i].send_index.clear();
+            vdataSenderCellAvg[i].send_vx.clear();
+            vdataSenderCellAvg[i].send_vy.clear();
+            vdataSenderCellAvg[i].send_vz.clear();
+        }
+
+        extrapolateEmptyCellsFromNeighbors();
+        std::cout << "rank = " << rank_ << " rasterize (cell_avg) done!" << std::endl;
+    }
+
     void setSimBox(T Lmin, T Lmax)
     {
         Lmin_ = Lmin;
@@ -980,6 +1159,7 @@ public:
 
         vdataSender.resize(size);
         vdataSenderSPH.resize(size);
+        vdataSenderCellAvg.resize(size);
     }
 
     T calculateDistance(T x, T y, T z, int i, int j, int k)
@@ -1066,7 +1246,7 @@ public:
     {
         auto mesh_indices = cstone::decodeHilbert(key);
         // unsigned divisor      = std::pow(2, (21 - powerDim));
-        unsigned divisor = 1 + std::pow(2, 21) / gridDim;
+        unsigned divisor = 1 + (1 << 21) / gridDim;
 
         int meshCoordX_base = util::get<0>(mesh_indices) / divisor;
         int meshCoordY_base = util::get<1>(mesh_indices) / divisor;
@@ -1096,10 +1276,10 @@ private:
     // Calculates the volume centers instead of starting with Lmin and adding deltaMesh
     void setCoordinates(T Lmin, T Lmax)
     {
-        T deltaMesh     = (Lmax - Lmin) / (gridDim_);
+        T deltaMesh     = (Lmax - Lmin) / static_cast<T>(gridDim_);
         T centerCoord   = deltaMesh / 2;
         T startingCoord = Lmin + centerCoord;
-        T displacement  = inbox_.low[0] / gridDim_;
+        T displacement  = static_cast<T>(inbox_.low[0]) / static_cast<T>(gridDim_) * (Lmax - Lmin);
 
 #pragma omp parallel for
         for (int i = 0; i < inbox_.size[0]; i++)
@@ -1119,6 +1299,10 @@ template<typename T>
 void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
                                           std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
                                           std::vector<T> h, int powerDim);
+template<typename T>
+void rasterize_particles_to_mesh_cell_avg_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x,
+                                               std::vector<T> y, std::vector<T> z, std::vector<T> vx,
+                                               std::vector<T> vy, std::vector<T> vz, int powerDim);
 #endif
 
 #ifdef USE_NVSHMEM

@@ -98,10 +98,10 @@ __global__ void classifyParticlesKernel(KeyType* keys, T* x, T* y, T* z, T* vx, 
     }
 }
 
-// Kernel to update mesh with local assignments
+// Pass 1: atomically record the minimum distance per cell — no velocity writes.
+// Both local and recv variants share the same logic; a single kernel suffices.
 template<typename T>
-__global__ void updateMeshLocalKernel(uint64_t* indices, T* distances, T* vx, T* vy, T* vz, int count, T* meshVelX,
-                                    T* meshVelY, T* meshVelZ, T* meshDistance)
+__global__ void updateMeshDistanceKernel(uint64_t* indices, T* distances, int count, T* meshDistance)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count) return;
@@ -109,54 +109,34 @@ __global__ void updateMeshLocalKernel(uint64_t* indices, T* distances, T* vx, T*
     uint64_t meshIndex = indices[idx];
     T        distance  = distances[idx];
 
-    // Atomically update if this particle is closer
     unsigned long long int* distance_as_ull = (unsigned long long int*)&meshDistance[meshIndex];
     unsigned long long int  old             = *distance_as_ull;
     unsigned long long int  assumed;
 
     do
     {
-        assumed       = old;
-        T oldDistance = __longlong_as_double(old);
-        if (distance >= oldDistance) break;
+        assumed = old;
+        if (distance >= __longlong_as_double(old)) break;
         old = atomicCAS(distance_as_ull, assumed, __double_as_longlong(distance));
     } while (assumed != old);
-
-    // If we updated the distance, also update velocities
-    if (__longlong_as_double(old) > distance)
-    {
-        meshVelX[meshIndex] = vx[idx];
-        meshVelY[meshIndex] = vy[idx];
-        meshVelZ[meshIndex] = vz[idx];
-    }
 }
 
-// Kernel to update mesh with received data
+// Pass 2: write velocities only for the particle that owns the settled minimum.
+// Must be launched after a cudaDeviceSynchronize() following all distance-update passes,
+// so that meshDistance contains the true global minimum before any velocity is written.
 template<typename T>
-__global__ void updateMeshRecvKernel(uint64_t* indices, T* distances, T* vx, T* vy, T* vz, int count, T* meshVelX,
-                                    T* meshVelY, T* meshVelZ, T* meshDistance)
+__global__ void assignVelocitiesKernel(uint64_t* indices, T* distances, T* vx, T* vy, T* vz, int count,
+                                       T* meshVelX, T* meshVelY, T* meshVelZ, T* meshDistance)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count) return;
 
     uint64_t meshIndex = indices[idx];
-    T        distance  = distances[idx];
 
-    // Atomically update if this particle is closer
-    unsigned long long int* distance_as_ull = (unsigned long long int*)&meshDistance[meshIndex];
-    unsigned long long int  old             = *distance_as_ull;
-    unsigned long long int  assumed;
-
-    do
-    {
-        assumed       = old;
-        T oldDistance = __longlong_as_double(old);
-        if (distance >= oldDistance) break;
-        old = atomicCAS(distance_as_ull, assumed, __double_as_longlong(distance));
-    } while (assumed != old);
-
-    // If we updated the distance, also update velocities
-    if (__longlong_as_double(old) > distance)
+    // Bitwise comparison: only the particle whose distance exactly matches the
+    // settled minimum gets to write — eliminates the race between CAS and stores.
+    unsigned long long int stored = *(unsigned long long int*)&meshDistance[meshIndex];
+    if (stored == __double_as_longlong(distances[idx]))
     {
         meshVelX[meshIndex] = vx[idx];
         meshVelY[meshIndex] = vy[idx];
@@ -208,7 +188,7 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
                                           int powerDim)
 {
     std::cout << "rank" << mesh.rank_ << " rasterize start (CUDA) " << powerDim << std::endl;
-    std::cout << "rank" << mesh.rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+    std::cout << "rank" << mesh.rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
 
     int      numParticles = keys.size();
     uint64_t inboxSize    = static_cast<uint64_t>(mesh.inbox_.size[0]) * mesh.inbox_.size[1] * mesh.inbox_.size[2];
@@ -337,14 +317,13 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     std::cout << "rank = " << mesh.rank_ << " local count = " << h_localCount << " remote count = " << h_remoteCount
                 << std::endl;
 
-    // ========== Update Mesh with Local Assignments ==========
+    // ========== Pass 1a: Settle minimum distances for local particles ==========
     if (h_localCount > 0)
     {
         int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
-        updateMeshLocalKernel<T><<<localBlocks, threadsPerBlock>>>(d_localIndices, d_localDistances, d_localVx,
-                                                                d_localVy, d_localVz, h_localCount, d_meshVelX,
-                                                                d_meshVelY, d_meshVelZ, d_meshDistance);
-        checkCudaError(cudaDeviceSynchronize(), "Local mesh update kernel");
+        updateMeshDistanceKernel<T><<<localBlocks, threadsPerBlock>>>(
+            d_localIndices, d_localDistances, h_localCount, d_meshDistance);
+        checkCudaError(cudaDeviceSynchronize(), "Local distance CAS kernel");
     }
 
     // ========== Process Remote Assignments ==========
@@ -471,12 +450,25 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
             cudaMemcpy(d_recvVz, mesh.recv_vz.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
             "Copying recv vz to device");
 
-        // Launch kernel to update mesh
+        // Pass 1b: settle minimum distances for received particles
         int recvBlocks = (mesh.recv_disp[mesh.numRanks_] + threadsPerBlock - 1) / threadsPerBlock;
-        updateMeshRecvKernel<T><<<recvBlocks, threadsPerBlock>>>(d_recvIndices, d_recvDistances, d_recvVx, d_recvVy,
-                                                                d_recvVz, mesh.recv_disp[mesh.numRanks_], d_meshVelX,
-                                                                d_meshVelY, d_meshVelZ, d_meshDistance);
-        checkCudaError(cudaDeviceSynchronize(), "Received mesh update kernel");
+        updateMeshDistanceKernel<T><<<recvBlocks, threadsPerBlock>>>(
+            d_recvIndices, d_recvDistances, mesh.recv_disp[mesh.numRanks_], d_meshDistance);
+        checkCudaError(cudaDeviceSynchronize(), "Recv distance CAS kernel");
+
+        // Pass 2: all minimum distances are now settled — assign velocities.
+        // Local particles first, then received; both check against the same meshDistance.
+        if (h_localCount > 0)
+        {
+            int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
+            assignVelocitiesKernel<T><<<localBlocks, threadsPerBlock>>>(
+                d_localIndices, d_localDistances, d_localVx, d_localVy, d_localVz,
+                h_localCount, d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance);
+        }
+        assignVelocitiesKernel<T><<<recvBlocks, threadsPerBlock>>>(
+            d_recvIndices, d_recvDistances, d_recvVx, d_recvVy, d_recvVz,
+            mesh.recv_disp[mesh.numRanks_], d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance);
+        checkCudaError(cudaDeviceSynchronize(), "Velocity assignment kernel");
 
         // Free temporary receive buffers
         cudaFree(d_recvIndices);
@@ -485,23 +477,27 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         cudaFree(d_recvVy);
         cudaFree(d_recvVz);
     }
+    else if (h_localCount > 0)
+    {
+        // No recv data — pass 2 for local particles only
+        int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
+        assignVelocitiesKernel<T><<<localBlocks, threadsPerBlock>>>(
+            d_localIndices, d_localDistances, d_localVx, d_localVy, d_localVz,
+            h_localCount, d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance);
+        checkCudaError(cudaDeviceSynchronize(), "Velocity assignment kernel (local only)");
+    }
 
-    // ========== Keep Device Memory for FFT (don't copy back to host) ==========
-    // Store device pointers in mesh for later use by FFT
-    // Free old device pointers if they exist
+    // ========== Keep Device Memory for FFT ==========
     if (mesh.d_velX_) cudaFree(mesh.d_velX_);
     if (mesh.d_velY_) cudaFree(mesh.d_velY_);
     if (mesh.d_velZ_) cudaFree(mesh.d_velZ_);
-    
-    // Transfer ownership of device memory to mesh
-    mesh.d_velX_ = d_meshVelX;
-    mesh.d_velY_ = d_meshVelY;
-    mesh.d_velZ_ = d_meshVelZ;
+    if (mesh.d_distance_) cudaFree(mesh.d_distance_);
+
+    mesh.d_velX_       = d_meshVelX;
+    mesh.d_velY_       = d_meshVelY;
+    mesh.d_velZ_       = d_meshVelZ;
+    mesh.d_distance_   = d_meshDistance;
     mesh.gpuDataValid_ = true;
-    
-    // Copy distance back to host (not needed for FFT)
-    checkCudaError(cudaMemcpy(mesh.distance_.data(), d_meshDistance, inboxSize * sizeof(T), cudaMemcpyDeviceToHost),
-                    "Copying mesh distance back to host");
 
     // ========== Free Other Device Memory ==========
     cudaFree(d_keys);
@@ -513,7 +509,6 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     cudaFree(d_vz);
     cudaFree(d_inboxLow);
     cudaFree(d_inboxHigh);
-    cudaFree(d_inboxSize);
     cudaFree(d_procGrid);
     cudaFree(d_localIndices);
     cudaFree(d_localDistances);
@@ -528,8 +523,7 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     cudaFree(d_remoteVy);
     cudaFree(d_remoteVz);
     cudaFree(d_remoteCount);
-    cudaFree(d_meshDistance);
-    // Note: d_meshVelX, d_meshVelY, d_meshVelZ are NOT freed here - they're stored in mesh
+    // Note: d_meshVelX/Y/Z and d_meshDistance NOT freed — stored in mesh
 
     // Clear send buffers
     for (int i = 0; i < mesh.numRanks_; i++)
@@ -541,8 +535,25 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         mesh.vdataSender[i].send_vz.clear();
     }
 
-    // Extrapolate empty cells
-    mesh.extrapolateEmptyCellsFromNeighbors();
+    // ========== GPU Extrapolation ==========
+    T* d_srcVelX, *d_srcVelY, *d_srcVelZ;
+    checkCudaError(cudaMalloc(&d_srcVelX, inboxSize * sizeof(T)), "d_srcVelX extrap");
+    checkCudaError(cudaMalloc(&d_srcVelY, inboxSize * sizeof(T)), "d_srcVelY extrap");
+    checkCudaError(cudaMalloc(&d_srcVelZ, inboxSize * sizeof(T)), "d_srcVelZ extrap");
+    checkCudaError(cudaMemcpy(d_srcVelX, mesh.d_velX_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velX");
+    checkCudaError(cudaMemcpy(d_srcVelY, mesh.d_velY_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velY");
+    checkCudaError(cudaMemcpy(d_srcVelZ, mesh.d_velZ_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velZ");
+
+    launchExtrapolateEmptyCellsKernel<T>(d_srcVelX, d_srcVelY, d_srcVelZ,
+                                          mesh.d_velX_, mesh.d_velY_, mesh.d_velZ_,
+                                          mesh.d_distance_, d_inboxSize,
+                                          mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]);
+    checkCudaError(cudaDeviceSynchronize(), "GPU extrapolate");
+
+    cudaFree(d_srcVelX);
+    cudaFree(d_srcVelY);
+    cudaFree(d_srcVelZ);
+    cudaFree(d_inboxSize); // freed here after extrapolation kernel
 
     std::cout << "rank = " << mesh.rank_ << " rasterize (CUDA) done!" << std::endl;
 }
@@ -556,7 +567,7 @@ void rasterize_particles_to_mesh_nvshmem(Mesh<T>& mesh, std::vector<KeyType> key
     static_assert(std::is_same_v<T, double>, "NVSHMEM rasterization currently supports double precision.");
 
     std::cout << "rank" << mesh.rank_ << " rasterize start (NVSHMEM) " << powerDim << std::endl;
-    std::cout << "rank" << mesh.rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+    std::cout << "rank" << mesh.rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
 
     const int pe     = nvshmem_my_pe();
     const int npes   = nvshmem_n_pes();
@@ -1040,7 +1051,7 @@ __global__ void accumulateSPHContributionsKernel(uint64_t* indices, T* weights, 
 template<typename T>
 __global__ void normalizeSPHVelocitiesKernel(T* meshWeightSum, T* meshWeightedVelX, T* meshWeightedVelY,
                                              T* meshWeightedVelZ, T* meshVelX, T* meshVelY, T* meshVelZ,
-                                             uint64_t inboxSize)
+                                             T* meshDistance, uint64_t inboxSize)
 {
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= inboxSize) return;
@@ -1050,7 +1061,9 @@ __global__ void normalizeSPHVelocitiesKernel(T* meshWeightSum, T* meshWeightedVe
         meshVelX[idx] = meshWeightedVelX[idx] / meshWeightSum[idx];
         meshVelY[idx] = meshWeightedVelY[idx] / meshWeightSum[idx];
         meshVelZ[idx] = meshWeightedVelZ[idx] / meshWeightSum[idx];
+        meshDistance[idx] = T(0); // mark as filled for GPU extrapolation
     }
+    // else: meshDistance stays infinity → cell will be extrapolated
 }
 
 // CUDA implementation of SPH rasterization
@@ -1060,7 +1073,7 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
                                          std::vector<T> h, int powerDim)
 {
     std::cout << "rank" << mesh.rank_ << " rasterize start (CUDA SPH) " << powerDim << std::endl;
-    std::cout << "rank" << mesh.rank_ << " keys between " << *keys.begin() << " - " << *keys.end() << std::endl;
+    std::cout << "rank" << mesh.rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
 
     int      numParticles = keys.size();
     uint64_t inboxSize    = static_cast<uint64_t>(mesh.inbox_.size[0]) * mesh.inbox_.size[1] * mesh.inbox_.size[2];
@@ -1373,23 +1386,28 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     }
 
     // ========== Normalize Velocities ==========
+    // Allocate and initialize d_meshDistance (infinity = empty, 0 = filled)
+    T* d_meshDistance;
+    checkCudaError(cudaMalloc(&d_meshDistance, inboxSize * sizeof(T)), "Allocating d_meshDistance SPH");
+    checkCudaError(cudaMemcpy(d_meshDistance, mesh.distance_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
+                    "Initializing d_meshDistance SPH");
+
     int normalizeBlocks = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
     normalizeSPHVelocitiesKernel<T><<<normalizeBlocks, threadsPerBlock>>>(
-        d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY, d_meshWeightedVelZ, d_meshVelX, d_meshVelY, d_meshVelZ,
-        inboxSize);
+        d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY, d_meshWeightedVelZ,
+        d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance, inboxSize);
     checkCudaError(cudaDeviceSynchronize(), "Normalize SPH velocities kernel");
 
-    // ========== Keep Device Memory for FFT (don't copy back to host) ==========
-    // Store device pointers in mesh for later use by FFT
-    // Free old device pointers if they exist
+    // ========== Keep Device Memory for FFT ==========
     if (mesh.d_velX_) cudaFree(mesh.d_velX_);
     if (mesh.d_velY_) cudaFree(mesh.d_velY_);
     if (mesh.d_velZ_) cudaFree(mesh.d_velZ_);
-    
-    // Transfer ownership of device memory to mesh
-    mesh.d_velX_ = d_meshVelX;
-    mesh.d_velY_ = d_meshVelY;
-    mesh.d_velZ_ = d_meshVelZ;
+    if (mesh.d_distance_) cudaFree(mesh.d_distance_);
+
+    mesh.d_velX_       = d_meshVelX;
+    mesh.d_velY_       = d_meshVelY;
+    mesh.d_velZ_       = d_meshVelZ;
+    mesh.d_distance_   = d_meshDistance;
     mesh.gpuDataValid_ = true;
 
     // ========== Free Other Device Memory ==========
@@ -1403,7 +1421,6 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     cudaFree(d_h);
     cudaFree(d_inboxLow);
     cudaFree(d_inboxHigh);
-    cudaFree(d_inboxSize);
     cudaFree(d_procGrid);
     cudaFree(d_remoteRanks);
     cudaFree(d_remoteIndices);
@@ -1416,7 +1433,7 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     cudaFree(d_meshWeightedVelX);
     cudaFree(d_meshWeightedVelY);
     cudaFree(d_meshWeightedVelZ);
-    // Note: d_meshVelX, d_meshVelY, d_meshVelZ are NOT freed here - they're stored in mesh
+    // Note: d_meshVelX/Y/Z and d_meshDistance NOT freed — stored in mesh
 
     // Clear send buffers
     for (int i = 0; i < mesh.numRanks_; i++)
@@ -1428,10 +1445,444 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
         mesh.vdataSenderSPH[i].send_weighted_vz.clear();
     }
 
-    // Extrapolate empty cells
-    mesh.extrapolateEmptyCellsFromNeighbors();
+    // ========== GPU Extrapolation ==========
+    T* d_srcVelX, *d_srcVelY, *d_srcVelZ;
+    checkCudaError(cudaMalloc(&d_srcVelX, inboxSize * sizeof(T)), "d_srcVelX extrap SPH");
+    checkCudaError(cudaMalloc(&d_srcVelY, inboxSize * sizeof(T)), "d_srcVelY extrap SPH");
+    checkCudaError(cudaMalloc(&d_srcVelZ, inboxSize * sizeof(T)), "d_srcVelZ extrap SPH");
+    checkCudaError(cudaMemcpy(d_srcVelX, mesh.d_velX_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velX SPH");
+    checkCudaError(cudaMemcpy(d_srcVelY, mesh.d_velY_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velY SPH");
+    checkCudaError(cudaMemcpy(d_srcVelZ, mesh.d_velZ_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velZ SPH");
+
+    launchExtrapolateEmptyCellsKernel<T>(d_srcVelX, d_srcVelY, d_srcVelZ,
+                                          mesh.d_velX_, mesh.d_velY_, mesh.d_velZ_,
+                                          mesh.d_distance_, d_inboxSize,
+                                          mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]);
+    checkCudaError(cudaDeviceSynchronize(), "GPU extrapolate SPH");
+
+    cudaFree(d_srcVelX);
+    cudaFree(d_srcVelY);
+    cudaFree(d_srcVelZ);
+    cudaFree(d_inboxSize); // freed here after extrapolation kernel is done
 
     std::cout << "rank = " << mesh.rank_ << " rasterize (CUDA SPH) done!" << std::endl;
+}
+
+// ============================================================
+// Cell-average interpolation kernels
+// ============================================================
+
+// Classify each particle as local or remote (no distance — cell membership only).
+template<typename T>
+__global__ void classifyParticlesCellAvgKernel(KeyType* keys, T* vx, T* vy, T* vz, int numParticles,
+                                               int gridDim, int* inboxSize, int* procGrid, int rank,
+                                               uint64_t* localIndices, T* localVx, T* localVy, T* localVz,
+                                               int* localCount,
+                                               int* remoteRanks, uint64_t* remoteIndices,
+                                               T* remoteVx, T* remoteVy, T* remoteVz, int* remoteCount)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+
+    auto     coords  = cstone::decodeHilbert(keys[idx]);
+    unsigned divisor = 1 + (1 << 21) / gridDim;
+    int      indexi  = util::get<0>(coords) / divisor;
+    int      indexj  = util::get<1>(coords) / divisor;
+    int      indexk  = util::get<2>(coords) / divisor;
+
+    int xBox       = indexi / inboxSize[0];
+    int yBox       = indexj / inboxSize[1];
+    int zBox       = indexk / inboxSize[2];
+    int targetRank = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
+
+    int      xLocal     = indexi % inboxSize[0];
+    int      yLocal     = indexj % inboxSize[1];
+    int      zLocal     = indexk % inboxSize[2];
+    uint64_t inboxIndex = xLocal + yLocal * inboxSize[0] + zLocal * inboxSize[0] * inboxSize[1];
+
+    if (targetRank == rank)
+    {
+        int pos          = atomicAdd(localCount, 1);
+        localIndices[pos] = inboxIndex;
+        localVx[pos]      = vx[idx];
+        localVy[pos]      = vy[idx];
+        localVz[pos]      = vz[idx];
+    }
+    else
+    {
+        int pos              = atomicAdd(remoteCount, 1);
+        remoteRanks[pos]     = targetRank;
+        remoteIndices[pos]   = inboxIndex;
+        remoteVx[pos]        = vx[idx];
+        remoteVy[pos]        = vy[idx];
+        remoteVz[pos]        = vz[idx];
+    }
+}
+
+// Accumulate velocity contributions into per-cell sums (atomic).
+template<typename T>
+__global__ void accumulateCellAvgKernel(uint64_t* indices, T* vx, T* vy, T* vz, int count,
+                                        T* velXSum, T* velYSum, T* velZSum, int* cellCount)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+
+    uint64_t cell = indices[idx];
+    atomicAdd(&velXSum[cell], vx[idx]);
+    atomicAdd(&velYSum[cell], vy[idx]);
+    atomicAdd(&velZSum[cell], vz[idx]);
+    atomicAdd(&cellCount[cell], 1);
+}
+
+// Divide accumulated sums by count; mark filled cells with distance = 0.
+template<typename T>
+__global__ void normalizeCellAvgKernel(T* velXSum, T* velYSum, T* velZSum, int* cellCount,
+                                       T* velX, T* velY, T* velZ, T* meshDistance, uint64_t inboxSize)
+{
+    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= inboxSize) return;
+
+    if (cellCount[idx] > 0)
+    {
+        T n         = static_cast<T>(cellCount[idx]);
+        velX[idx]   = velXSum[idx] / n;
+        velY[idx]   = velYSum[idx] / n;
+        velZ[idx]   = velZSum[idx] / n;
+        meshDistance[idx] = T(0); // finite sentinel → cell is filled
+    }
+    // else: velX/Y/Z stays 0, meshDistance stays infinity → extrapolated on host
+}
+
+template<typename T>
+void rasterize_particles_to_mesh_cell_avg_cuda(Mesh<T>& mesh, std::vector<KeyType> keys,
+                                               std::vector<T> x, std::vector<T> y, std::vector<T> z,
+                                               std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
+                                               int powerDim)
+{
+    std::cout << "rank" << mesh.rank_ << " rasterize start (CUDA cell_avg) " << powerDim << std::endl;
+    std::cout << "rank" << mesh.rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
+
+    int      numParticles = keys.size();
+    uint64_t inboxSize    = static_cast<uint64_t>(mesh.inbox_.size[0]) * mesh.inbox_.size[1] * mesh.inbox_.size[2];
+
+    // ===== Device allocations =====
+    KeyType*  d_keys;
+    T *       d_x, *d_y, *d_z, *d_vx, *d_vy, *d_vz;
+    int *     d_inboxSize, *d_procGrid;
+
+    uint64_t* d_localIndices;
+    T *       d_localVx, *d_localVy, *d_localVz;
+    int*      d_localCount;
+
+    int*      d_remoteRanks;
+    uint64_t* d_remoteIndices;
+    T *       d_remoteVx, *d_remoteVy, *d_remoteVz;
+    int*      d_remoteCount;
+
+    T *       d_velXSum, *d_velYSum, *d_velZSum;
+    int*      d_cellCount;
+    T *       d_meshVelX, *d_meshVelY, *d_meshVelZ, *d_meshDistance;
+
+    checkCudaError(cudaMalloc(&d_keys, numParticles * sizeof(KeyType)), "d_keys");
+    checkCudaError(cudaMalloc(&d_x, numParticles * sizeof(T)), "d_x");
+    checkCudaError(cudaMalloc(&d_y, numParticles * sizeof(T)), "d_y");
+    checkCudaError(cudaMalloc(&d_z, numParticles * sizeof(T)), "d_z");
+    checkCudaError(cudaMalloc(&d_vx, numParticles * sizeof(T)), "d_vx");
+    checkCudaError(cudaMalloc(&d_vy, numParticles * sizeof(T)), "d_vy");
+    checkCudaError(cudaMalloc(&d_vz, numParticles * sizeof(T)), "d_vz");
+    checkCudaError(cudaMalloc(&d_inboxSize, 3 * sizeof(int)), "d_inboxSize");
+    checkCudaError(cudaMalloc(&d_procGrid,  3 * sizeof(int)), "d_procGrid");
+
+    checkCudaError(cudaMalloc(&d_localIndices,  numParticles * sizeof(uint64_t)), "d_localIndices");
+    checkCudaError(cudaMalloc(&d_localVx,       numParticles * sizeof(T)), "d_localVx");
+    checkCudaError(cudaMalloc(&d_localVy,       numParticles * sizeof(T)), "d_localVy");
+    checkCudaError(cudaMalloc(&d_localVz,       numParticles * sizeof(T)), "d_localVz");
+    checkCudaError(cudaMalloc(&d_localCount,    sizeof(int)), "d_localCount");
+
+    checkCudaError(cudaMalloc(&d_remoteRanks,    numParticles * sizeof(int)),      "d_remoteRanks");
+    checkCudaError(cudaMalloc(&d_remoteIndices,  numParticles * sizeof(uint64_t)), "d_remoteIndices");
+    checkCudaError(cudaMalloc(&d_remoteVx,       numParticles * sizeof(T)), "d_remoteVx");
+    checkCudaError(cudaMalloc(&d_remoteVy,       numParticles * sizeof(T)), "d_remoteVy");
+    checkCudaError(cudaMalloc(&d_remoteVz,       numParticles * sizeof(T)), "d_remoteVz");
+    checkCudaError(cudaMalloc(&d_remoteCount,    sizeof(int)), "d_remoteCount");
+
+    checkCudaError(cudaMalloc(&d_velXSum,     inboxSize * sizeof(T)),   "d_velXSum");
+    checkCudaError(cudaMalloc(&d_velYSum,     inboxSize * sizeof(T)),   "d_velYSum");
+    checkCudaError(cudaMalloc(&d_velZSum,     inboxSize * sizeof(T)),   "d_velZSum");
+    checkCudaError(cudaMalloc(&d_cellCount,   inboxSize * sizeof(int)), "d_cellCount");
+    checkCudaError(cudaMalloc(&d_meshVelX,    inboxSize * sizeof(T)),   "d_meshVelX");
+    checkCudaError(cudaMalloc(&d_meshVelY,    inboxSize * sizeof(T)),   "d_meshVelY");
+    checkCudaError(cudaMalloc(&d_meshVelZ,    inboxSize * sizeof(T)),   "d_meshVelZ");
+    checkCudaError(cudaMalloc(&d_meshDistance, inboxSize * sizeof(T)),  "d_meshDistance");
+
+    // ===== Copy input data =====
+    checkCudaError(cudaMemcpy(d_keys, keys.data(), numParticles * sizeof(KeyType), cudaMemcpyHostToDevice), "cp keys");
+    checkCudaError(cudaMemcpy(d_x,   x.data(),   numParticles * sizeof(T), cudaMemcpyHostToDevice), "cp x");
+    checkCudaError(cudaMemcpy(d_y,   y.data(),   numParticles * sizeof(T), cudaMemcpyHostToDevice), "cp y");
+    checkCudaError(cudaMemcpy(d_z,   z.data(),   numParticles * sizeof(T), cudaMemcpyHostToDevice), "cp z");
+    checkCudaError(cudaMemcpy(d_vx,  vx.data(),  numParticles * sizeof(T), cudaMemcpyHostToDevice), "cp vx");
+    checkCudaError(cudaMemcpy(d_vy,  vy.data(),  numParticles * sizeof(T), cudaMemcpyHostToDevice), "cp vy");
+    checkCudaError(cudaMemcpy(d_vz,  vz.data(),  numParticles * sizeof(T), cudaMemcpyHostToDevice), "cp vz");
+
+    std::array<int, 3> inboxSizeArr = {mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]};
+    checkCudaError(cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice), "cp inboxSize");
+    checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice), "cp procGrid");
+
+    // Initialise accumulators to zero; meshDistance to infinity
+    checkCudaError(cudaMemset(d_velXSum,   0, inboxSize * sizeof(T)),   "memset velXSum");
+    checkCudaError(cudaMemset(d_velYSum,   0, inboxSize * sizeof(T)),   "memset velYSum");
+    checkCudaError(cudaMemset(d_velZSum,   0, inboxSize * sizeof(T)),   "memset velZSum");
+    checkCudaError(cudaMemset(d_cellCount, 0, inboxSize * sizeof(int)), "memset cellCount");
+    checkCudaError(cudaMemset(d_meshVelX,  0, inboxSize * sizeof(T)),   "memset meshVelX");
+    checkCudaError(cudaMemset(d_meshVelY,  0, inboxSize * sizeof(T)),   "memset meshVelY");
+    checkCudaError(cudaMemset(d_meshVelZ,  0, inboxSize * sizeof(T)),   "memset meshVelZ");
+    checkCudaError(cudaMemcpy(d_meshDistance, mesh.distance_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
+                   "cp distance (inf)");
+
+    int zeroVal = 0;
+    checkCudaError(cudaMemcpy(d_localCount,  &zeroVal, sizeof(int), cudaMemcpyHostToDevice), "init localCount");
+    checkCudaError(cudaMemcpy(d_remoteCount, &zeroVal, sizeof(int), cudaMemcpyHostToDevice), "init remoteCount");
+
+    // ===== Classify particles =====
+    int threadsPerBlock = 256;
+    int blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
+
+    classifyParticlesCellAvgKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
+        d_keys, d_vx, d_vy, d_vz, numParticles, mesh.gridDim_,
+        d_inboxSize, d_procGrid, mesh.rank_,
+        d_localIndices, d_localVx, d_localVy, d_localVz, d_localCount,
+        d_remoteRanks, d_remoteIndices, d_remoteVx, d_remoteVy, d_remoteVz, d_remoteCount);
+    checkCudaError(cudaDeviceSynchronize(), "classify cell_avg kernel");
+
+    int h_localCount, h_remoteCount;
+    checkCudaError(cudaMemcpy(&h_localCount,  d_localCount,  sizeof(int), cudaMemcpyDeviceToHost), "cp localCount");
+    checkCudaError(cudaMemcpy(&h_remoteCount, d_remoteCount, sizeof(int), cudaMemcpyDeviceToHost), "cp remoteCount");
+
+    // ===== Accumulate local particles =====
+    if (h_localCount > 0)
+    {
+        int lb = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
+        accumulateCellAvgKernel<T><<<lb, threadsPerBlock>>>(
+            d_localIndices, d_localVx, d_localVy, d_localVz, h_localCount,
+            d_velXSum, d_velYSum, d_velZSum, d_cellCount);
+        checkCudaError(cudaDeviceSynchronize(), "accumulate local cell_avg");
+    }
+
+    // ===== Copy remote particles to host, organise by rank, MPI exchange =====
+    std::vector<int>      h_remoteRanks(h_remoteCount);
+    std::vector<uint64_t> h_remoteIndices(h_remoteCount);
+    std::vector<T>        h_remoteVx(h_remoteCount), h_remoteVy(h_remoteCount), h_remoteVz(h_remoteCount);
+
+    if (h_remoteCount > 0)
+    {
+        checkCudaError(cudaMemcpy(h_remoteRanks.data(),   d_remoteRanks,    h_remoteCount * sizeof(int),      cudaMemcpyDeviceToHost), "cp remoteRanks");
+        checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices,  h_remoteCount * sizeof(uint64_t), cudaMemcpyDeviceToHost), "cp remoteIndices");
+        checkCudaError(cudaMemcpy(h_remoteVx.data(),      d_remoteVx,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVx");
+        checkCudaError(cudaMemcpy(h_remoteVy.data(),      d_remoteVy,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVy");
+        checkCudaError(cudaMemcpy(h_remoteVz.data(),      d_remoteVz,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVz");
+    }
+
+    std::fill(mesh.send_count.begin(), mesh.send_count.end(), 0);
+    std::fill(mesh.send_disp.begin(),  mesh.send_disp.end(),  0);
+    for (int i = 0; i < h_remoteCount; i++)
+    {
+        int r = h_remoteRanks[i];
+        mesh.send_count[r]++;
+        mesh.vdataSenderCellAvg[r].send_index.push_back(h_remoteIndices[i]);
+        mesh.vdataSenderCellAvg[r].send_vx.push_back(h_remoteVx[i]);
+        mesh.vdataSenderCellAvg[r].send_vy.push_back(h_remoteVy[i]);
+        mesh.vdataSenderCellAvg[r].send_vz.push_back(h_remoteVz[i]);
+    }
+
+    MPI_Alltoall(mesh.send_count.data(), 1, MpiType<int>{}, mesh.recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
+
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        mesh.send_disp[i + 1] = mesh.send_disp[i] + mesh.send_count[i];
+        mesh.recv_disp[i + 1] = mesh.recv_disp[i] + mesh.recv_count[i];
+    }
+
+    mesh.send_index_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+    mesh.send_vx_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+    mesh.send_vy_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+    mesh.send_vz_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+
+    for (int i = 0; i < mesh.numRanks_; i++)
+        for (int j = mesh.send_disp[i]; j < mesh.send_disp[i + 1]; j++)
+        {
+            int local = j - mesh.send_disp[i];
+            mesh.send_index_cavg[j] = mesh.vdataSenderCellAvg[i].send_index[local];
+            mesh.send_vx_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vx[local];
+            mesh.send_vy_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vy[local];
+            mesh.send_vz_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vz[local];
+        }
+
+    mesh.recv_index_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
+    mesh.recv_vx_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
+    mesh.recv_vy_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
+    mesh.recv_vz_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
+
+    MPI_Alltoallv(mesh.send_index_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
+                  mesh.recv_index_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+    MPI_Alltoallv(mesh.send_vx_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                  mesh.recv_vx_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+    MPI_Alltoallv(mesh.send_vy_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                  mesh.recv_vy_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+    MPI_Alltoallv(mesh.send_vz_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                  mesh.recv_vz_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+    // ===== Accumulate received particles on device =====
+    int recvTotal = mesh.recv_disp[mesh.numRanks_];
+    if (recvTotal > 0)
+    {
+        uint64_t* d_recvIndices;
+        T *       d_recvVx, *d_recvVy, *d_recvVz;
+        checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "d_recvIndices cavg");
+        checkCudaError(cudaMalloc(&d_recvVx,      recvTotal * sizeof(T)),        "d_recvVx cavg");
+        checkCudaError(cudaMalloc(&d_recvVy,      recvTotal * sizeof(T)),        "d_recvVy cavg");
+        checkCudaError(cudaMalloc(&d_recvVz,      recvTotal * sizeof(T)),        "d_recvVz cavg");
+
+        checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index_cavg.data(), recvTotal * sizeof(uint64_t), cudaMemcpyHostToDevice), "cp recv idx cavg");
+        checkCudaError(cudaMemcpy(d_recvVx,      mesh.recv_vx_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vx cavg");
+        checkCudaError(cudaMemcpy(d_recvVy,      mesh.recv_vy_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vy cavg");
+        checkCudaError(cudaMemcpy(d_recvVz,      mesh.recv_vz_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vz cavg");
+
+        int rb = (recvTotal + threadsPerBlock - 1) / threadsPerBlock;
+        accumulateCellAvgKernel<T><<<rb, threadsPerBlock>>>(
+            d_recvIndices, d_recvVx, d_recvVy, d_recvVz, recvTotal,
+            d_velXSum, d_velYSum, d_velZSum, d_cellCount);
+        checkCudaError(cudaDeviceSynchronize(), "accumulate recv cell_avg");
+
+        cudaFree(d_recvIndices);
+        cudaFree(d_recvVx);
+        cudaFree(d_recvVy);
+        cudaFree(d_recvVz);
+    }
+
+    // ===== Normalise =====
+    int nb = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
+    normalizeCellAvgKernel<T><<<nb, threadsPerBlock>>>(
+        d_velXSum, d_velYSum, d_velZSum, d_cellCount,
+        d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance, inboxSize);
+    checkCudaError(cudaDeviceSynchronize(), "normalize cell_avg");
+
+    // Keep velocity and distance buffers on device
+    if (mesh.d_velX_) cudaFree(mesh.d_velX_);
+    if (mesh.d_velY_) cudaFree(mesh.d_velY_);
+    if (mesh.d_velZ_) cudaFree(mesh.d_velZ_);
+    if (mesh.d_distance_) cudaFree(mesh.d_distance_);
+
+    mesh.d_velX_       = d_meshVelX;
+    mesh.d_velY_       = d_meshVelY;
+    mesh.d_velZ_       = d_meshVelZ;
+    mesh.d_distance_   = d_meshDistance;
+    mesh.gpuDataValid_ = true;
+
+    // ===== Free temporaries =====
+    cudaFree(d_keys);   cudaFree(d_x);    cudaFree(d_y);    cudaFree(d_z);
+    cudaFree(d_vx);     cudaFree(d_vy);   cudaFree(d_vz);
+    cudaFree(d_procGrid);
+    cudaFree(d_localIndices); cudaFree(d_localVx);  cudaFree(d_localVy);  cudaFree(d_localVz);
+    cudaFree(d_localCount);
+    cudaFree(d_remoteRanks); cudaFree(d_remoteIndices);
+    cudaFree(d_remoteVx); cudaFree(d_remoteVy); cudaFree(d_remoteVz); cudaFree(d_remoteCount);
+    cudaFree(d_velXSum); cudaFree(d_velYSum); cudaFree(d_velZSum);
+    cudaFree(d_cellCount);
+    // Note: d_meshVelX/Y/Z and d_meshDistance NOT freed — stored in mesh
+
+    // Clear send buffers
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        mesh.vdataSenderCellAvg[i].send_index.clear();
+        mesh.vdataSenderCellAvg[i].send_vx.clear();
+        mesh.vdataSenderCellAvg[i].send_vy.clear();
+        mesh.vdataSenderCellAvg[i].send_vz.clear();
+    }
+
+    // ========== GPU Extrapolation ==========
+    T* d_srcVelX, *d_srcVelY, *d_srcVelZ;
+    checkCudaError(cudaMalloc(&d_srcVelX, inboxSize * sizeof(T)), "d_srcVelX extrap cell_avg");
+    checkCudaError(cudaMalloc(&d_srcVelY, inboxSize * sizeof(T)), "d_srcVelY extrap cell_avg");
+    checkCudaError(cudaMalloc(&d_srcVelZ, inboxSize * sizeof(T)), "d_srcVelZ extrap cell_avg");
+    checkCudaError(cudaMemcpy(d_srcVelX, mesh.d_velX_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velX cell_avg");
+    checkCudaError(cudaMemcpy(d_srcVelY, mesh.d_velY_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velY cell_avg");
+    checkCudaError(cudaMemcpy(d_srcVelZ, mesh.d_velZ_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velZ cell_avg");
+
+    launchExtrapolateEmptyCellsKernel<T>(d_srcVelX, d_srcVelY, d_srcVelZ,
+                                          mesh.d_velX_, mesh.d_velY_, mesh.d_velZ_,
+                                          mesh.d_distance_, d_inboxSize,
+                                          mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]);
+    checkCudaError(cudaDeviceSynchronize(), "GPU extrapolate cell_avg");
+
+    cudaFree(d_srcVelX);
+    cudaFree(d_srcVelY);
+    cudaFree(d_srcVelZ);
+    cudaFree(d_inboxSize); // freed here after extrapolation kernel
+
+    std::cout << "rank = " << mesh.rank_ << " rasterize (CUDA cell_avg) done!" << std::endl;
+}
+
+// GPU kernel to extrapolate empty mesh cells from filled neighbors.
+// Reads from immutable src snapshot, writes to vel output — no races.
+template<typename T>
+__global__ void extrapolateEmptyCellsKernel(const T* __restrict__ srcVelX,
+                                             const T* __restrict__ srcVelY,
+                                             const T* __restrict__ srcVelZ,
+                                             T* velX, T* velY, T* velZ,
+                                             const T* distance, const int* inboxSize)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x; // fast (x)
+    int j = blockIdx.y * blockDim.y + threadIdx.y; // mid  (y)
+    int i = blockIdx.z * blockDim.z + threadIdx.z; // slow (z)
+
+    if (k >= inboxSize[0] || j >= inboxSize[1] || i >= inboxSize[2]) return;
+
+    uint64_t idx =
+        (uint64_t)k + (uint64_t)j * inboxSize[0] + (uint64_t)i * inboxSize[0] * inboxSize[1];
+
+    if (!isinf(distance[idx])) return; // already filled — nothing to do
+
+    T   velXSum = 0, velYSum = 0, velZSum = 0;
+    int count   = 0;
+    for (int ni = i - 1; ni <= i + 1; ni++)
+    {
+        if (ni < 0 || ni >= inboxSize[2]) continue;
+        for (int nj = j - 1; nj <= j + 1; nj++)
+        {
+            if (nj < 0 || nj >= inboxSize[1]) continue;
+            for (int nk = k - 1; nk <= k + 1; nk++)
+            {
+                if (nk < 0 || nk >= inboxSize[0]) continue;
+                uint64_t nidx =
+                    (uint64_t)nk + (uint64_t)nj * inboxSize[0] + (uint64_t)ni * inboxSize[0] * inboxSize[1];
+                if (!isinf(distance[nidx]))
+                {
+                    velXSum += srcVelX[nidx];
+                    velYSum += srcVelY[nidx];
+                    velZSum += srcVelZ[nidx];
+                    count++;
+                }
+            }
+        }
+    }
+    if (count > 0)
+    {
+        velX[idx] = velXSum / count;
+        velY[idx] = velYSum / count;
+        velZ[idx] = velZSum / count;
+    }
+}
+
+template<typename T>
+void launchExtrapolateEmptyCellsKernel(const T* srcVelX, const T* srcVelY, const T* srcVelZ,
+                                        T* velX, T* velY, T* velZ,
+                                        const T* distance, const int* inboxSize_d,
+                                        int sx, int sy, int sz)
+{
+    dim3 blockSize(8, 8, 8);
+    dim3 gridSize((sx + 7) / 8, (sy + 7) / 8, (sz + 7) / 8);
+    extrapolateEmptyCellsKernel<T><<<gridSize, blockSize>>>(
+        srcVelX, srcVelY, srcVelZ, velX, velY, velZ, distance, inboxSize_d);
 }
 
 // CUDA kernel to compute power spectrum from FFT output (squared magnitude)
@@ -1532,6 +1983,10 @@ template void launchSphericalAveragingKernel<double>(double*, double*, double*, 
                                                       int*, int*, int, int, dim3, dim3);
 
 // Explicit template instantiation for double
+template void launchExtrapolateEmptyCellsKernel<double>(const double*, const double*, const double*,
+                                                         double*, double*, double*,
+                                                         const double*, const int*, int, int, int);
+
 template void rasterize_particles_to_mesh_cuda<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
                                                         std::vector<double>, std::vector<double>, std::vector<double>,
                                                         std::vector<double>, std::vector<double>, int);
@@ -1539,6 +1994,9 @@ template void rasterize_particles_to_mesh_sph_cuda<double>(Mesh<double>&, std::v
                                                             std::vector<double>, std::vector<double>, std::vector<double>,
                                                             std::vector<double>, std::vector<double>, std::vector<double>,
                                                             int);
+template void rasterize_particles_to_mesh_cell_avg_cuda<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
+                                                                 std::vector<double>, std::vector<double>, std::vector<double>,
+                                                                 std::vector<double>, std::vector<double>, int);
 
 #ifdef USE_NVSHMEM
 template void rasterize_particles_to_mesh_nvshmem<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,

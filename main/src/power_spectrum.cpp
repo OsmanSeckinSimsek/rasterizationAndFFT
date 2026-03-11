@@ -164,7 +164,7 @@ int main(int argc, char** argv)
     std::cout << "Read " << reader->localNumParticles() << " particles on rank " << rank << std::endl;
 
     // get the dimensions from the checkpoint
-    int powerDim = std::ceil(std::log(simDim) / std::log(2)) + 1;
+    int powerDim = std::ceil(std::log(simDim) / std::log(2));// + 1;
     int gridDim  = std::pow(2, powerDim);  //simDim; // std::pow(2, powerDim); // dimension of the mesh
     if (numShells == 0) numShells = gridDim / 2; // default number of shells is half of the mesh dimension
 
@@ -198,11 +198,7 @@ int main(int argc, char** argv)
     // Choose interpolation method
     if (interpolationMode == "sph")
     {
-        // Use SPH interpolation
-        if (rank == 0)
-        {
-            std::cout << "Using SPH interpolation" << std::endl;
-        }
+        if (rank == 0) std::cout << "Using SPH interpolation" << std::endl;
         if (backend == RasterBackend::Cuda)
         {
 #ifdef USE_CUDA
@@ -216,19 +212,31 @@ int main(int argc, char** argv)
             mesh.rasterize_particles_to_mesh_sph(keys, x, y, z, vx, vy, vz, h, powerDim);
         }
     }
+    else if (interpolationMode == "cell_avg")
+    {
+        if (rank == 0) std::cout << "Using cell-average interpolation" << std::endl;
+        if (backend == RasterBackend::Cuda)
+        {
+#ifdef USE_CUDA
+            rasterize_particles_to_mesh_cell_avg_cuda(mesh, keys, x, y, z, vx, vy, vz, powerDim);
+#else
+            mesh.rasterize_particles_to_mesh_cell_avg(keys, x, y, z, vx, vy, vz, powerDim);
+#endif
+        }
+        else
+        {
+            mesh.rasterize_particles_to_mesh_cell_avg(keys, x, y, z, vx, vy, vz, powerDim);
+        }
+    }
     else
     {
-        // Use nearest neighbor interpolation
-        if (rank == 0)
-        {
-            std::cout << "Using nearest neighbor interpolation" << std::endl;
-        }
+        // Default: nearest neighbor
+        if (rank == 0) std::cout << "Using nearest neighbor interpolation" << std::endl;
         if (backend == RasterBackend::Nvshmem)
         {
 #ifdef USE_NVSHMEM
             rasterize_particles_to_mesh_nvshmem(mesh, keys, x, y, z, vx, vy, vz, powerDim);
 #else
-            // Should be unreachable due to earlier check, but keep as safety.
             mesh.rasterize_particles_to_mesh(keys, x, y, z, vx, vy, vz, powerDim);
 #endif
         }
@@ -291,6 +299,6 @@ void printSpectrumHelp(char* name, int rank)
                "checkpoint data.\n\n");
         printf("\t--backend \t\t Rasterization backend: 'cpu', 'cuda' (or 'gpudirect'), 'nvshmem',"
                " or omit for automatic selection (prefers nvshmem, then cuda, then cpu).\n\n");
-        printf("\t--interpolation \t\t Interpolation method: 'nearest' (default) or 'sph' for SPH interpolation.\n\n");
+        printf("\t--interpolation \t\t Interpolation method: 'nearest' (default), 'sph', or 'cell_avg'.\n\n");
     }
 }
