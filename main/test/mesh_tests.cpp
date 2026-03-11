@@ -28,15 +28,14 @@ TEST(mestTest, testSetCoordinates)
     int          numShells = gridSize / 2;
     Mesh<double> mesh(rank, numRanks, gridSize, numShells);
 
-    std::vector<double> solution_x = {-0.45, -0.35, -0.25, -0.15, -0.05, 0.05, 0.15,  0.25,  0.35,  0.45};
-    std::vector<double> solution_y = {-0.45, -0.35, -0.25, -0.15, -0.05, 0.05, 0.15,  0.25,  0.35,  0.45};
-    std::vector<double> solution_z = {-0.45, -0.35, -0.25, -0.15, -0.05, 0.05, 0.15,  0.25,  0.35,  0.45};
+    // x_ holds the cell-center x-coordinates for this rank's local inbox slice.
+    // Expected values are the full sorted set; we check only the entries owned by this rank.
+    std::vector<double> all_coords = {-0.45, -0.35, -0.25, -0.15, -0.05, 0.05, 0.15, 0.25, 0.35, 0.45};
 
-    for (size_t i = 0; i < mesh.x_.size(); i++)
+    for (int i = 0; i < mesh.inbox_.size[0]; i++)
     {
-        EXPECT_NEAR(mesh.x_[i], solution_x[i], 1e-12);
-        EXPECT_NEAR(mesh.y_[i], solution_y[i], 1e-12);
-        EXPECT_NEAR(mesh.z_[i], solution_z[i], 1e-12);
+        int global_i = mesh.inbox_.low[0] + i;
+        EXPECT_NEAR(mesh.x_[i], all_coords[global_i], 1e-12);
     }
 }
 
@@ -129,6 +128,44 @@ TEST(meshTest, testSphericalAveraging)
     mesh.perform_spherical_averaging(freqVelo.data());
 }
 
+TEST(meshTest, testCellAvgRasterization)
+{
+    int rank = 0, numRanks = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numRanks);
+
+    int          gridSize  = 4;
+    int          numShells = gridSize / 2;
+    Mesh<double> mesh(rank, numRanks, gridSize, numShells);
+
+    // Two particles both mapping to global cell (0,0,0):
+    //   key=0  →  decodeHilbert(0) = (0,0,0)
+    //   divisor = 1 + (1<<21)/4 = 524289  →  mesh cell (0/524289, ...) = (0,0,0)
+    // Velocities chosen so the per-cell average is easy to verify:
+    //   avg vx = (1+3)/2 = 2,  avg vy = (2+4)/2 = 3,  avg vz = (0+6)/2 = 3
+    // Since every MPI rank sends the same two particles to rank 0, the global
+    // accumulator is  vx_sum = 4*numRanks, count = 2*numRanks → average = 2 ✓
+    std::vector<KeyType> keys = {0, 0};
+    std::vector<double>  x    = {-0.45, -0.45};
+    std::vector<double>  y    = {-0.45, -0.45};
+    std::vector<double>  z    = {-0.45, -0.45};
+    std::vector<double>  vx   = {1.0, 3.0};
+    std::vector<double>  vy   = {2.0, 4.0};
+    std::vector<double>  vz   = {0.0, 6.0};
+
+    mesh.rasterize_particles_to_mesh_cell_avg(keys, x, y, z, vx, vy, vz, /*powerDim=*/2);
+
+    // Global cell (0,0,0) is owned by rank 0; its local inbox index is 0.
+    if (rank == 0)
+    {
+        EXPECT_NEAR(mesh.velX_[0], 2.0, 1e-12);
+        EXPECT_NEAR(mesh.velY_[0], 3.0, 1e-12);
+        EXPECT_NEAR(mesh.velZ_[0], 3.0, 1e-12);
+        // Filled cell must have finite distance sentinel.
+        EXPECT_NEAR(mesh.distance_[0], 0.0, 1e-12);
+    }
+}
+
 TEST(meshTest, testCalculateRankFromMeshCoord)
 {
     int rank = 0, numRanks = 0;
@@ -139,15 +176,24 @@ TEST(meshTest, testCalculateRankFromMeshCoord)
     int          numShells = gridSize / 2;
     Mesh<double> mesh(rank, numRanks, gridSize, numShells);
 
+    // Expected rank per global cell, enumerated in (z, y, x) order matching
+    // the solution for 8 MPI ranks with a 4x4x4 grid.
     std::vector<int> solution = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1,
                                   1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3,
                                   3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4,
                                   4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6,
                                   6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7};
 
-    for (size_t i = 0; i < mesh.x_.size(); i++)
+    int idx = 0;
+    for (int k = 0; k < gridSize; k++)
     {
-        int out_rank = mesh.calculateRankFromMeshCoord(mesh.x_[i], mesh.y_[i], mesh.z_[i]);
-        EXPECT_EQ(out_rank, solution[i]);
+        for (int j = 0; j < gridSize; j++)
+        {
+            for (int i = 0; i < gridSize; i++)
+            {
+                int out_rank = mesh.calculateRankFromMeshCoord(i, j, k);
+                EXPECT_EQ(out_rank, solution[idx++]);
+            }
+        }
     }
 }
