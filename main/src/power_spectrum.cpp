@@ -124,9 +124,10 @@ int main(int argc, char** argv)
     
     const std::string initFile           = parser.get("--checkpoint");
     int               stepNo             = parser.get("--stepNo", 0);
-    float             meshSizeMultiplier = parser.get("--meshSizeMultiplier", 1.0);
+    int               meshSize           = parser.get("--gridSize", 0);
     size_t            numShells          = parser.get("--numShells", 0);
     std::string       interpolationMode  = parser.get<std::string>("--interpolation", "nearest"); // "nearest" or "sph"
+    std::string       outputFile         = parser.get<std::string>("--output", "power_spectrum.txt");
 
     Timer timer(std::cout);
 
@@ -165,7 +166,15 @@ int main(int argc, char** argv)
 
     // get the dimensions from the checkpoint
     int powerDim = std::ceil(std::log(simDim) / std::log(2));// + 1;
-    int gridDim  = std::pow(2, powerDim);  //simDim; // std::pow(2, powerDim); // dimension of the mesh
+    int gridDim;
+    if (meshSize > 0)
+    {
+        gridDim = meshSize; // override if mesh size is provided as argument
+    }
+    else
+    {
+        gridDim = simDim; // dimension of the mesh // std::pow(2, powerDim);
+    }
     if (numShells == 0) numShells = gridDim / 2; // default number of shells is half of the mesh dimension
 
     // init mesh, sim box -0.5 to 0.5 by default
@@ -265,7 +274,7 @@ int main(int argc, char** argv)
     if (rank == 0)
     {
         // write power spectrum to file mesh.power_spectrum_ vector has the normalized data
-        std::ofstream file("power_spectrum.txt");
+        std::ofstream file(outputFile);
         for (size_t i = 1; i < mesh.numShells_; i++)
         {
             file << std::scientific << (double)(i) << " " << mesh.power_spectrum_[i] << std::endl;
@@ -294,11 +303,12 @@ void printSpectrumHelp(char* name, int rank)
 
         printf("\t--checkpoint \t\t HDF5 checkpoint file with simulation data\n\n");
         printf("\t--stepNo \t\t Step number of the HDF5 checkpoint file with simulation data\n\n");
-        printf("\t--meshSizeMultiplier \t\t Multiplier for the mesh size over the grid size.\n\n");
-        printf("\t--numShells \t\t Number of shells for averaging. Default is half of mesh dimension read from the "
+        printf("\t--gridSize \t\t Grid size.\n\n");
+        printf("\t--numShells \t\t Number of shells for averaging. Default is half of grid dimension read from the "
                "checkpoint data.\n\n");
         printf("\t--backend \t\t Rasterization backend: 'cpu', 'cuda' (or 'gpudirect'), 'nvshmem',"
                " or omit for automatic selection (prefers nvshmem, then cuda, then cpu).\n\n");
         printf("\t--interpolation \t\t Interpolation method: 'nearest' (default), 'sph', or 'cell_avg'.\n\n");
+        printf("\t--output \t\t Output filename for the power spectrum (default: power_spectrum.txt).\n\n");
     }
 }
