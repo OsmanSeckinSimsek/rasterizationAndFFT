@@ -732,16 +732,26 @@ public:
         T meshSizeT = static_cast<T>(meshSize); // Convert to T type for kernel
         
         fft.forward(d_velX, d_output);
+        // Synchronize before reading d_output: heFFTe (cuFFT backend) may submit
+        // FFT work to a non-default CUDA stream.  Without an explicit sync the
+        // power-spectrum kernel on stream 0 can start reading d_output before
+        // heFFTe has finished writing it, yielding all-zero results.
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT for velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         launchComputePowerSpectrumKernel(d_output, d_velX, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         fft.forward(d_velY, d_output);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT for velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         launchComputePowerSpectrumKernel(d_output, d_velY, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         fft.forward(d_velZ, d_output);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT for velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         launchComputePowerSpectrumKernel(d_output, d_velZ, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
@@ -856,6 +866,18 @@ public:
         int threadsPerBlock = 256;
         int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
         launchComputeFreqVeloKernel(d_velX_, d_velY_, d_velZ_, d_freqVelo_, inboxSize, blocksPerGrid, threadsPerBlock);
+        cudaDeviceSynchronize();
+
+        // Diagnostic: copy first element of d_velX_ and d_freqVelo_ to host to
+        // verify the FFT and freqVelo steps produced non-zero values.
+        {
+            T dbg_velX0 = T(0), dbg_freq0 = T(0);
+            cudaMemcpy(&dbg_velX0, d_velX_,    sizeof(T), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&dbg_freq0, d_freqVelo_, sizeof(T), cudaMemcpyDeviceToHost);
+            std::cout << "rank=" << rank_
+                      << " DEBUG d_velX_[0]=" << dbg_velX0
+                      << " d_freqVelo_[0]=" << dbg_freq0 << std::endl;
+        }
         
         // Prepare k_values and k_1d on host (small arrays)
         std::vector<T> k_values(gridDim_);
