@@ -725,36 +725,44 @@ public:
         err = cudaMalloc(&d_output, fft.size_outbox() * sizeof(std::complex<T>));
         if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_output: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
 
-        // Perform FFT on device and compute power spectrum on GPU
+        // heffte::fft3d<cufft> requires complex input.  Passing a raw T* (double*)
+        // causes the cuFFT backend to operate in-place on the input buffer and leave
+        // d_output untouched (all zeros).  We therefore explicitly promote each real
+        // velocity component to complex<T> (imaginary = 0) before calling forward().
+        std::complex<T>* d_input_cplx = nullptr;
+        err = cudaMalloc(&d_input_cplx, inboxSize * sizeof(std::complex<T>));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_input_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+
         int threadsPerBlock = 256;
         int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
-        
-        T meshSizeT = static_cast<T>(meshSize); // Convert to T type for kernel
-        
-        fft.forward(d_velX, d_output);
-        // Synchronize before reading d_output: heFFTe (cuFFT backend) may submit
-        // FFT work to a non-default CUDA stream.  Without an explicit sync the
-        // power-spectrum kernel on stream 0 can start reading d_output before
-        // heFFTe has finished writing it, yielding all-zero results.
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT for velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        launchComputePowerSpectrumKernel(d_output, d_velX, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        T   meshSizeT     = static_cast<T>(meshSize);
 
-        fft.forward(d_velY, d_output);
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT for velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        launchComputePowerSpectrumKernel(d_output, d_velY, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        // Helper lambda: zero imaginary parts, copy real velocities, then FFT + power spectrum.
+        auto fftComponent = [&](T* d_vel) {
+            // Zero the complex buffer (sets both re and im to 0).
+            cudaMemset(d_input_cplx, 0, inboxSize * sizeof(std::complex<T>));
+            // Copy real velocities into the real part of each complex element.
+            // cudaMemcpy2D: dst stride = sizeof(complex<T>), src stride = sizeof(T),
+            // so d_input_cplx[i].re = d_vel[i], d_input_cplx[i].im stays 0.
+            cudaMemcpy2D(d_input_cplx,            sizeof(std::complex<T>),
+                         d_vel,                   sizeof(T),
+                         sizeof(T),               inboxSize,
+                         cudaMemcpyDeviceToDevice);
 
-        fft.forward(d_velZ, d_output);
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT for velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        launchComputePowerSpectrumKernel(d_output, d_velZ, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel for velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            fft.forward(d_input_cplx, d_output);
+            err = cudaDeviceSynchronize();
+            if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+
+            launchComputePowerSpectrumKernel(d_output, d_vel, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
+            err = cudaDeviceSynchronize();
+            if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        };
+
+        fftComponent(d_velX);
+        fftComponent(d_velY);
+        fftComponent(d_velZ);
+
+        cudaFree(d_input_cplx);
         
         // Keep per-component power spectrum on device for GPU spherical averaging.
         // If d_velX/Y/Z were locally allocated (CPU rasterization path), transfer
@@ -866,18 +874,6 @@ public:
         int threadsPerBlock = 256;
         int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
         launchComputeFreqVeloKernel(d_velX_, d_velY_, d_velZ_, d_freqVelo_, inboxSize, blocksPerGrid, threadsPerBlock);
-        cudaDeviceSynchronize();
-
-        // Diagnostic: copy first element of d_velX_ and d_freqVelo_ to host to
-        // verify the FFT and freqVelo steps produced non-zero values.
-        {
-            T dbg_velX0 = T(0), dbg_freq0 = T(0);
-            cudaMemcpy(&dbg_velX0, d_velX_,    sizeof(T), cudaMemcpyDeviceToHost);
-            cudaMemcpy(&dbg_freq0, d_freqVelo_, sizeof(T), cudaMemcpyDeviceToHost);
-            std::cout << "rank=" << rank_
-                      << " DEBUG d_velX_[0]=" << dbg_velX0
-                      << " d_freqVelo_[0]=" << dbg_freq0 << std::endl;
-        }
         
         // Prepare k_values and k_1d on host (small arrays)
         std::vector<T> k_values(gridDim_);
