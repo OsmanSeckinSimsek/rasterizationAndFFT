@@ -128,6 +128,7 @@ int main(int argc, char** argv)
     size_t            numShells          = parser.get("--numShells", 0);
     std::string       interpolationMode  = parser.get<std::string>("--interpolation", "nearest"); // "nearest" or "sph"
     std::string       outputFile         = parser.get<std::string>("--output", "power_spectrum.txt");
+    bool              usePencils         = parser.exists("--pencils");
 
     Timer timer(std::cout);
 
@@ -179,6 +180,7 @@ int main(int argc, char** argv)
 
     // init mesh, sim box -0.5 to 0.5 by default
     Mesh<MeshType> mesh(rank, numRanks, gridDim, numShells);
+    mesh.usePencils_ = usePencils;
 
     // mesh.assign_velocities_to_mesh(x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(), simDim, gridDim);
 
@@ -310,5 +312,6 @@ void printSpectrumHelp(char* name, int rank)
                " or omit for automatic selection (prefers nvshmem, then cuda, then cpu).\n\n");
         printf("\t--interpolation \t\t Interpolation method: 'nearest' (default), 'sph', or 'cell_avg'.\n\n");
         printf("\t--output \t\t Output filename for the power spectrum (default: power_spectrum.txt).\n\n");
+        printf("\t--pencils \t\t Use heFFTe pencil decomposition instead of the default slab decomposition.\n\n");
     }
 }

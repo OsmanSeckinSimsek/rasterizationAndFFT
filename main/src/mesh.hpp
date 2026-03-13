@@ -73,6 +73,7 @@ public:
     int                numShells_;
     T                  Lmin_;
     T                  Lmax_;
+    bool               usePencils_ = false; // heFFTe decomposition: false=slabs, true=pencils
     std::array<int, 3> proc_grid_;
 
     heffte::box3d<> inbox_;
@@ -681,7 +682,7 @@ public:
 #ifdef USE_CUDA
         // Use CUDA backend for GPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::cufft>();
-        options.use_pencils          = false;
+        options.use_pencils          = usePencils_;
 
         heffte::fft3d<heffte::backend::cufft> fft(inbox_, outbox, MPI_COMM_WORLD, options);
 
@@ -783,7 +784,7 @@ public:
 #else
         // Use FFTW backend for CPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::fftw>();
-        options.use_pencils          = false; // slabs need fewer redistribution stages → ~3× less workspace
+        options.use_pencils          = usePencils_;
 
         heffte::fft3d<heffte::backend::fftw> fft(inbox_, outbox, MPI_COMM_WORLD, options);
 
