@@ -694,8 +694,7 @@ public:
         // Use existing GPU data if available (from CUDA rasterization), otherwise allocate and copy
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
         T* d_velX, *d_velY, *d_velZ;
-        std::complex<T>* d_output;
-        
+
         cudaError_t err;
         
         if (gpuDataValid_ && d_velX_ && d_velY_ && d_velZ_)
@@ -723,13 +722,17 @@ public:
             if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         }
         
-        err = cudaMalloc(&d_output, fft.size_outbox() * sizeof(std::complex<T>));
-        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_output: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-
         // heffte::fft3d<cufft> requires complex input.  Passing a raw T* (double*)
         // causes the cuFFT backend to operate in-place on the input buffer and leave
         // d_output untouched (all zeros).  We therefore explicitly promote each real
         // velocity component to complex<T> (imaginary = 0) before calling forward().
+        //
+        // In the multi-rank case with outbox == inbox_, heFFTe performs an extra
+        // back-transpose to redistribute the FFT result back to the inbox layout.
+        // During this step heFFTe writes the final output into the INPUT buffer
+        // (d_input_cplx) rather than a separate output buffer — leaving a separate
+        // d_output all-zeros.  Using d_input_cplx as both input and output (in-place
+        // FFT) ensures the result is always in d_input_cplx regardless of rank count.
         std::complex<T>* d_input_cplx = nullptr;
         err = cudaMalloc(&d_input_cplx, inboxSize * sizeof(std::complex<T>));
         if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_input_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
@@ -738,7 +741,9 @@ public:
         int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
         T   meshSizeT     = static_cast<T>(meshSize);
 
-        // Helper lambda: zero imaginary parts, copy real velocities, then FFT + power spectrum.
+        // Helper lambda: zero imaginary parts, copy real velocities, then in-place
+        // FFT + power spectrum.  d_input_cplx serves as both input and output so
+        // the result is always available in d_input_cplx after forward().
         auto fftComponent = [&](T* d_vel) {
             // Zero the complex buffer (sets both re and im to 0).
             cudaMemset(d_input_cplx, 0, inboxSize * sizeof(std::complex<T>));
@@ -750,11 +755,12 @@ public:
                          sizeof(T),               inboxSize,
                          cudaMemcpyDeviceToDevice);
 
-            fft.forward(d_input_cplx, d_output);
+            // In-place FFT: input == output, result written back to d_input_cplx.
+            fft.forward(d_input_cplx, d_input_cplx);
             err = cudaDeviceSynchronize();
             if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
 
-            launchComputePowerSpectrumKernel(d_output, d_vel, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
+            launchComputePowerSpectrumKernel(d_input_cplx, d_vel, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
             err = cudaDeviceSynchronize();
             if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         };
@@ -764,7 +770,7 @@ public:
         fftComponent(d_velZ);
 
         cudaFree(d_input_cplx);
-        
+
         // Keep per-component power spectrum on device for GPU spherical averaging.
         // If d_velX/Y/Z were locally allocated (CPU rasterization path), transfer
         // ownership to the persistent mesh device pointers.
@@ -779,8 +785,6 @@ public:
         }
         // d_velX_/Y_/Z_ now hold per-component |FFT|²/N² values; keep for spherical averaging.
         gpuDataValid_ = true;
-
-        cudaFree(d_output);
 #else
         // Use FFTW backend for CPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::fftw>();
