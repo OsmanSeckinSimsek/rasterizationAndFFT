@@ -5,6 +5,7 @@
 #include <numbers>
 #include <iostream>
 #include <cstdlib>
+#include <unordered_map>
 #include "heffte.h"
 #include "cstone/domain/domain.hpp"
 #ifdef USE_CUDA
@@ -214,7 +215,7 @@ public:
                                      const std::vector<T>& vz, int powerDim)
     {
         std::cout << "rank" << rank_ << " rasterize start " << powerDim << std::endl;
-        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
+        // std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
 
         int particleIndex = 0;
         // iterate over keys vector
@@ -236,9 +237,9 @@ public:
             particleIndex++;
         }
 
-        std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
-        for (int i = 0; i < numRanks_; i++)
-            std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
+        // std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
+        // for (int i = 0; i < numRanks_; i++)
+        //     std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
 
         MPI_Alltoall(send_count.data(), 1, MpiType<int>{}, recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
 
@@ -267,7 +268,7 @@ public:
                 send_vz[j]       = vdataSender[i].send_vz[j - send_disp[i]];
             }
         }
-        std::cout << "rank = " << rank_ << " buffers transformed" << std::endl;
+        // std::cout << "rank = " << rank_ << " buffers transformed" << std::endl;
 
         // prepare receive buffers
         recv_index.resize(recv_disp[numRanks_]);
@@ -286,7 +287,7 @@ public:
                       recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
         MPI_Alltoallv(send_vz.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_vz.data(),
                       recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-        std::cout << "rank = " << rank_ << " alltoallv done!" << std::endl;
+        // std::cout << "rank = " << rank_ << " alltoallv done!" << std::endl;
 
         for (int i = 0; i < recv_disp[numRanks_]; i++)
         {
@@ -321,7 +322,7 @@ public:
                                          int powerDim)
     {
         std::cout << "rank" << rank_ << " rasterize start (SPH) " << powerDim << std::endl;
-        std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
+        // std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
 
         // Reset SPH accumulation arrays
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
@@ -341,6 +342,9 @@ public:
             vdataSenderSPH[i].send_weighted_vy.clear();
             vdataSenderSPH[i].send_weighted_vz.clear();
         }
+        // Aggregate remote SPH contributions by target rank + target local cell
+        // before MPI exchange to avoid per-particle-cell traffic explosion.
+        std::vector<std::unordered_map<uint64_t, std::array<T, 4>>> remoteCellAgg(numRanks_);
 
         T deltaMesh = (Lmax_ - Lmin_) / gridDim_;
 
@@ -412,8 +416,24 @@ public:
                                 T weightedVx = pvx * weight;
                                 T weightedVy = pvy * weight;
                                 T weightedVz = pvz * weight;
+                                int      targetRank  = calculateRankFromMeshCoord(i, j, k);
+                                uint64_t targetIndex = calculateInboxIndexFromMeshCoord(i, j, k);
 
-                                assignVelocityByMeshCoordSPH(i, j, k, weight, weightedVx, weightedVy, weightedVz);
+                                if (targetRank == rank_)
+                                {
+                                    weightSum_[targetIndex] += weight;
+                                    weightedVelX_[targetIndex] += weightedVx;
+                                    weightedVelY_[targetIndex] += weightedVy;
+                                    weightedVelZ_[targetIndex] += weightedVz;
+                                }
+                                else
+                                {
+                                    auto& agg = remoteCellAgg[targetRank][targetIndex];
+                                    agg[0] += weight;
+                                    agg[1] += weightedVx;
+                                    agg[2] += weightedVy;
+                                    agg[3] += weightedVz;
+                                }
                             }
                         }
                     }
@@ -423,9 +443,33 @@ public:
             particleIndex++;
         }
 
-        std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
-        for (int i = 0; i < numRanks_; i++)
-            std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
+        // Materialize aggregated remote entries into existing sender buffers.
+        for (int targetRank = 0; targetRank < numRanks_; targetRank++)
+        {
+            if (targetRank == rank_) continue;
+            auto& aggMap = remoteCellAgg[targetRank];
+            send_count[targetRank] = static_cast<int>(aggMap.size());
+            if (aggMap.empty()) continue;
+
+            auto& sender = vdataSenderSPH[targetRank];
+            sender.send_index.reserve(aggMap.size());
+            sender.send_weight.reserve(aggMap.size());
+            sender.send_weighted_vx.reserve(aggMap.size());
+            sender.send_weighted_vy.reserve(aggMap.size());
+            sender.send_weighted_vz.reserve(aggMap.size());
+            for (const auto& [idx, vals] : aggMap)
+            {
+                sender.send_index.push_back(idx);
+                sender.send_weight.push_back(vals[0]);
+                sender.send_weighted_vx.push_back(vals[1]);
+                sender.send_weighted_vy.push_back(vals[2]);
+                sender.send_weighted_vz.push_back(vals[3]);
+            }
+        }
+
+        // std::cout << "rank = " << rank_ << " particleIndex = " << particleIndex << std::endl;
+        // for (int i = 0; i < numRanks_; i++)
+        //     std::cout << "rank = " << rank_ << " send_count = " << send_count[i] << std::endl;
 
         // MPI communication for SPH data
         MPI_Alltoall(send_count.data(), 1, MpiType<int>{}, recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
@@ -442,7 +486,7 @@ public:
         send_weighted_vx.resize(send_disp[numRanks_]);
         send_weighted_vy.resize(send_disp[numRanks_]);
         send_weighted_vz.resize(send_disp[numRanks_]);
-        std::cout << "rank = " << rank_ << " buffers allocated" << std::endl;
+        // std::cout << "rank = " << rank_ << " buffers allocated" << std::endl;
 
         for (int i = 0; i < numRanks_; i++)
         {
@@ -456,7 +500,7 @@ public:
                 send_weighted_vz[j] = vdataSenderSPH[i].send_weighted_vz[localIdx];
             }
         }
-        std::cout << "rank = " << rank_ << " buffers transformed" << std::endl;
+        // std::cout << "rank = " << rank_ << " buffers transformed" << std::endl;
 
         // Prepare receive buffers
         recv_index_sph.resize(recv_disp[numRanks_]);
@@ -475,7 +519,7 @@ public:
                       recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
         MPI_Alltoallv(send_weighted_vz.data(), send_count.data(), send_disp.data(), MpiType<T>{}, recv_weighted_vz.data(),
                       recv_count.data(), recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-        std::cout << "rank = " << rank_ << " alltoallv done!" << std::endl;
+        // std::cout << "rank = " << rank_ << " alltoallv done!" << std::endl;
 
         // Accumulate received contributions
         for (int i = 0; i < recv_disp[numRanks_]; i++)
@@ -1047,7 +1091,7 @@ public:
                                                const std::vector<T>& vz, int powerDim)
     {
         std::cout << "rank" << rank_ << " rasterize start (cell_avg) " << powerDim << std::endl;
-        std::cout << "rank" << rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
+        // std::cout << "rank" << rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
 
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
                              static_cast<uint64_t>(inbox_.size[2]);

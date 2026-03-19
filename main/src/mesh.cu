@@ -1,5 +1,6 @@
 #include "mesh.hpp"
 #include <cuda_runtime.h>
+#include <limits>
 #include <type_traits>
 
 #ifdef USE_NVSHMEM
@@ -26,6 +27,47 @@ void checkCudaError(cudaError_t err, const char* msg)
         std::exit(EXIT_FAILURE);
     }
 }    
+
+// For decompositions where gridDim is not perfectly divisible by procGrid[d],
+// map a global index to (box-id, local-index, box-size) robustly.
+__device__ __forceinline__ void decomposeGlobalIndex1D(int g, int dim, int nBoxes,
+                                                        int& box, int& local, int& boxSize)
+{
+    int base   = dim / nBoxes;
+    int rem    = dim % nBoxes;
+    int cutoff = (base + 1) * rem;
+
+    if (g < cutoff)
+    {
+        boxSize = base + 1;
+        box     = g / boxSize;
+        local   = g - box * boxSize;
+    }
+    else
+    {
+        boxSize = base;
+        int shifted = g - cutoff;
+        box   = rem + shifted / boxSize;
+        local = shifted - (box - rem) * boxSize;
+    }
+}
+
+inline int boxSize1DHost(int dim, int nBoxes, int boxId)
+{
+    int base = dim / nBoxes;
+    int rem  = dim % nBoxes;
+    return (boxId < rem) ? (base + 1) : base;
+}
+
+inline std::array<int, 3> rankInboxSizeHost(int rank, int gridDim, const int* procGrid)
+{
+    int xBox = rank % procGrid[0];
+    int yBox = (rank / procGrid[0]) % procGrid[1];
+    int zBox = rank / (procGrid[0] * procGrid[1]);
+    return {boxSize1DHost(gridDim, procGrid[0], xBox),
+            boxSize1DHost(gridDim, procGrid[1], yBox),
+            boxSize1DHost(gridDim, procGrid[2], zBox)};
+}
 
 // Kernel to process particles and classify them as local or remote
 template<typename T>
@@ -63,17 +105,19 @@ __global__ void classifyParticlesKernel(KeyType* keys, T* x, T* y, T* z, T* vx, 
     T zDist    = z[idx] - cellCenterZ;
     T distance = sqrt(xDist * xDist + yDist * yDist + zDist * zDist);
 
-    // Determine which rank owns this mesh cell
-    int xBox       = indexi / inboxSize[0];
-    int yBox       = indexj / inboxSize[1];
-    int zBox       = indexk / inboxSize[2];
+    // Determine which rank owns this mesh cell (supports uneven decomposition)
+    int xBox, yBox, zBox;
+    int xLocal, yLocal, zLocal;
+    int xSize, ySize, zSize;
+    decomposeGlobalIndex1D(indexi, gridDim, procGrid[0], xBox, xLocal, xSize);
+    decomposeGlobalIndex1D(indexj, gridDim, procGrid[1], yBox, yLocal, ySize);
+    decomposeGlobalIndex1D(indexk, gridDim, procGrid[2], zBox, zLocal, zSize);
     int targetRank = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
 
-    // Calculate inbox index
-    int      xLocal     = indexi % inboxSize[0];
-    int      yLocal     = indexj % inboxSize[1];
-    int      zLocal     = indexk % inboxSize[2];
-    uint64_t inboxIndex = xLocal + yLocal * inboxSize[0] + zLocal * inboxSize[0] * inboxSize[1];
+    // Calculate local inbox index for the target rank box.
+    uint64_t inboxIndex = static_cast<uint64_t>(xLocal) +
+                          static_cast<uint64_t>(yLocal) * xSize +
+                          static_cast<uint64_t>(zLocal) * xSize * ySize;
 
     if (targetRank == rank)
     {
@@ -840,7 +884,7 @@ template<typename T>
 __global__ void countSPHContributionsKernel(T* x, T* y, T* z, T* h,
                                              int numParticles, int gridDim, T Lmin, T Lmax,
                                              int* inboxSize, int* procGrid, int rank,
-                                             int* remoteCount)
+                                             unsigned long long* remoteCount)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numParticles) return;
@@ -895,16 +939,19 @@ __global__ void countSPHContributionsKernel(T* x, T* y, T* z, T* h,
 
                     if (weight > 0.0)
                     {
-                        // Determine which rank owns this mesh cell
-                        int xBox = i / inboxSize[0];
-                        int yBox = j / inboxSize[1];
-                        int zBox = k / inboxSize[2];
+                        // Determine which rank owns this mesh cell (uneven-safe)
+                        int xBox, yBox, zBox;
+                        int xLocal, yLocal, zLocal;
+                        int xSize, ySize, zSize;
+                        decomposeGlobalIndex1D(i, gridDim, procGrid[0], xBox, xLocal, xSize);
+                        decomposeGlobalIndex1D(j, gridDim, procGrid[1], yBox, yLocal, ySize);
+                        decomposeGlobalIndex1D(k, gridDim, procGrid[2], zBox, zLocal, zSize);
                         int targetRank = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
 
                         if (targetRank != rank)
                         {
                             // Remote contribution - count it
-                            atomicAdd(remoteCount, 1);
+                            atomicAdd(remoteCount, 1ULL);
                         }
                     }
                 }
@@ -925,7 +972,7 @@ __global__ void computeSPHContributionsKernel(KeyType*  , T* x, T* y, T* z, T* v
                                               // Output: contributions to send (remote only)
                                               int* remoteRanks, uint64_t* remoteIndices, T* remoteWeights,
                                               T* remoteWeightedVx, T* remoteWeightedVy, T* remoteWeightedVz,
-                                              int* remoteCount)
+                                              int* remoteCount, int maxRemoteContributions)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numParticles) return;
@@ -990,17 +1037,19 @@ __global__ void computeSPHContributionsKernel(KeyType*  , T* x, T* y, T* z, T* v
                         T weightedVy = pvy * weight;
                         T weightedVz = pvz * weight;
 
-                        // Determine which rank owns this mesh cell
-                        int xBox = i / inboxSize[0];
-                        int yBox = j / inboxSize[1];
-                        int zBox = k / inboxSize[2];
+                        // Determine which rank owns this mesh cell (uneven-safe)
+                        int xBox, yBox, zBox;
+                        int xLocal, yLocal, zLocal;
+                        int xSize, ySize, zSize;
+                        decomposeGlobalIndex1D(i, gridDim, procGrid[0], xBox, xLocal, xSize);
+                        decomposeGlobalIndex1D(j, gridDim, procGrid[1], yBox, yLocal, ySize);
+                        decomposeGlobalIndex1D(k, gridDim, procGrid[2], zBox, zLocal, zSize);
                         int targetRank = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
 
-                        // Calculate inbox index
-                        int xLocal = i % inboxSize[0];
-                        int yLocal = j % inboxSize[1];
-                        int zLocal = k % inboxSize[2];
-                        uint64_t inboxIndex = xLocal + yLocal * inboxSize[0] + zLocal * inboxSize[0] * inboxSize[1];
+                        // Calculate local inbox index in target rank's local box.
+                        uint64_t inboxIndex = static_cast<uint64_t>(xLocal) +
+                                              static_cast<uint64_t>(yLocal) * xSize +
+                                              static_cast<uint64_t>(zLocal) * xSize * ySize;
 
                         if (targetRank == rank)
                         {
@@ -1014,12 +1063,16 @@ __global__ void computeSPHContributionsKernel(KeyType*  , T* x, T* y, T* z, T* v
                         {
                             // Remote assignment - store in buffer for MPI communication
                             int pos = atomicAdd(remoteCount, 1);
-                            remoteRanks[pos] = targetRank;
-                            remoteIndices[pos] = inboxIndex;
-                            remoteWeights[pos] = weight;
-                            remoteWeightedVx[pos] = weightedVx;
-                            remoteWeightedVy[pos] = weightedVy;
-                            remoteWeightedVz[pos] = weightedVz;
+                            // Guard against out-of-bounds writes if counting and fill passes diverge.
+                            if (pos < maxRemoteContributions)
+                            {
+                                remoteRanks[pos] = targetRank;
+                                remoteIndices[pos] = inboxIndex;
+                                remoteWeights[pos] = weight;
+                                remoteWeightedVx[pos] = weightedVx;
+                                remoteWeightedVy[pos] = weightedVy;
+                                remoteWeightedVz[pos] = weightedVz;
+                            }
                         }
                     }
                 }
@@ -1045,6 +1098,81 @@ __global__ void accumulateSPHContributionsKernel(uint64_t* indices, T* weights, 
     atomicAdd(&meshWeightedVelX[meshIndex], weightedVx[idx]);
     atomicAdd(&meshWeightedVelY[meshIndex], weightedVy[idx]);
     atomicAdd(&meshWeightedVelZ[meshIndex], weightedVz[idx]);
+}
+
+// Aggregate all SPH contributions destined to one target rank into per-cell sums.
+template<typename T>
+__global__ void accumulateSPHForTargetRankKernel(T* x, T* y, T* z, T* vx, T* vy, T* vz, T* h,
+                                                 int numParticles, int gridDim, T Lmin, T Lmax,
+                                                 int* procGrid, int targetRank,
+                                                 T* outWeightSum, T* outWeightedVelX,
+                                                 T* outWeightedVelY, T* outWeightedVelZ)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+
+    T px = x[idx];
+    T py = y[idx];
+    T pz = z[idx];
+    T pvx = vx[idx];
+    T pvy = vy[idx];
+    T pvz = vz[idx];
+    T ph = h[idx];
+
+    T deltaMesh = (Lmax - Lmin) / gridDim;
+    T h_eff = (ph < deltaMesh) ? ph : deltaMesh;
+    T searchRadius = 2.0 * h_eff;
+    T searchRadiusSq = searchRadius * searchRadius;
+
+    int minI = static_cast<int>((px - searchRadius - Lmin) / deltaMesh);
+    int maxI = static_cast<int>((px + searchRadius - Lmin) / deltaMesh) + 1;
+    int minJ = static_cast<int>((py - searchRadius - Lmin) / deltaMesh);
+    int maxJ = static_cast<int>((py + searchRadius - Lmin) / deltaMesh) + 1;
+    int minK = static_cast<int>((pz - searchRadius - Lmin) / deltaMesh);
+    int maxK = static_cast<int>((pz + searchRadius - Lmin) / deltaMesh) + 1;
+
+    minI = max(0, minI); maxI = min(gridDim, maxI);
+    minJ = max(0, minJ); maxJ = min(gridDim, maxJ);
+    minK = max(0, minK); maxK = min(gridDim, maxK);
+
+    for (int i = minI; i < maxI; i++)
+    {
+        for (int j = minJ; j < maxJ; j++)
+        {
+            for (int k = minK; k < maxK; k++)
+            {
+                T cellX = getCellCenterDevice(i, Lmin, Lmax, gridDim);
+                T cellY = getCellCenterDevice(j, Lmin, Lmax, gridDim);
+                T cellZ = getCellCenterDevice(k, Lmin, Lmax, gridDim);
+                T dx = px - cellX;
+                T dy = py - cellY;
+                T dz = pz - cellZ;
+                T distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq >= searchRadiusSq) continue;
+
+                T dist = sqrt(distSq);
+                T weight = sphKernelDevice(dist, h_eff);
+                if (weight <= 0.0) continue;
+
+                int xBox, yBox, zBox;
+                int xLocal, yLocal, zLocal;
+                int xSize, ySize, zSize;
+                decomposeGlobalIndex1D(i, gridDim, procGrid[0], xBox, xLocal, xSize);
+                decomposeGlobalIndex1D(j, gridDim, procGrid[1], yBox, yLocal, ySize);
+                decomposeGlobalIndex1D(k, gridDim, procGrid[2], zBox, zLocal, zSize);
+                int owner = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
+                if (owner != targetRank) continue;
+
+                uint64_t inboxIndex = static_cast<uint64_t>(xLocal) +
+                                      static_cast<uint64_t>(yLocal) * xSize +
+                                      static_cast<uint64_t>(zLocal) * xSize * ySize;
+                atomicAdd(&outWeightSum[inboxIndex], weight);
+                atomicAdd(&outWeightedVelX[inboxIndex], pvx * weight);
+                atomicAdd(&outWeightedVelY[inboxIndex], pvy * weight);
+                atomicAdd(&outWeightedVelZ[inboxIndex], pvz * weight);
+            }
+        }
+    }
 }
 
 // CUDA kernel to normalize velocities by weight sum
@@ -1103,12 +1231,6 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     // Mesh configuration
     int *d_inboxLow, *d_inboxHigh, *d_inboxSize, *d_procGrid;
 
-    // Remote contribution buffers (local contributions are accumulated directly to mesh arrays)
-    int*      d_remoteRanks;
-    uint64_t* d_remoteIndices;
-    T *       d_remoteWeights, *d_remoteWeightedVx, *d_remoteWeightedVy, *d_remoteWeightedVz;
-    int*      d_remoteCount;
-
     // SPH accumulation arrays
     T *d_meshWeightSum, *d_meshWeightedVelX, *d_meshWeightedVelY, *d_meshWeightedVelZ;
     T *d_meshVelX, *d_meshVelY, *d_meshVelZ;
@@ -1128,48 +1250,21 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     checkCudaError(cudaMalloc(&d_inboxSize, 3 * sizeof(int)), "Allocating d_inboxSize");
     checkCudaError(cudaMalloc(&d_procGrid, 3 * sizeof(int)), "Allocating d_procGrid");
 
-    // ========== First Pass: Count Remote Contributions Exactly ==========
-    int* d_remoteCountTemp;
-    checkCudaError(cudaMalloc(&d_remoteCountTemp, sizeof(int)), "Allocating d_remoteCountTemp");
-    int zeroCount = 0;
-    checkCudaError(cudaMemcpy(d_remoteCountTemp, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
-                    "Initializing remote count temp");
+    int threadsPerBlock = 256;
+    int blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
 
-    // Copy mesh configuration for counting
+    // Copy mesh/particle inputs used by SPH kernels.
     std::array<int, 3> inboxSizeArr = {mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]};
     checkCudaError(cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
                     "Copying inbox size to device");
     checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
                     "Copying proc_grid to device");
+    checkCudaError(cudaMemcpy(d_x, x.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying x to device");
+    checkCudaError(cudaMemcpy(d_y, y.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying y to device");
+    checkCudaError(cudaMemcpy(d_z, z.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying z to device");
+    checkCudaError(cudaMemcpy(d_h, h.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying h to device");
 
-    // Launch counting kernel
-    int threadsPerBlock = 256;
-    int blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
-    countSPHContributionsKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
-        d_x, d_y, d_z, d_h, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_,
-        d_inboxSize, d_procGrid, mesh.rank_, d_remoteCountTemp);
-
-    checkCudaError(cudaDeviceSynchronize(), "SPH counting kernel execution");
-
-    // Get exact count
-    int exactRemoteCount;
-    checkCudaError(cudaMemcpy(&exactRemoteCount, d_remoteCountTemp, sizeof(int), cudaMemcpyDeviceToHost),
-                    "Copying exact remote count to host");
-    cudaFree(d_remoteCountTemp);
-
-    std::cout << "rank = " << mesh.rank_ << " exact remote contributions count = " << exactRemoteCount << std::endl;
-
-    // Allocate exact amount needed (with small safety margin)
-    int maxRemoteContributions = exactRemoteCount + 1000; // Small safety margin for race conditions
-
-    checkCudaError(cudaMalloc(&d_remoteRanks, maxRemoteContributions * sizeof(int)), "Allocating d_remoteRanks");
-    checkCudaError(cudaMalloc(&d_remoteIndices, maxRemoteContributions * sizeof(uint64_t)), "Allocating d_remoteIndices");
-    checkCudaError(cudaMalloc(&d_remoteWeights, maxRemoteContributions * sizeof(T)), "Allocating d_remoteWeights");
-    checkCudaError(cudaMalloc(&d_remoteWeightedVx, maxRemoteContributions * sizeof(T)), "Allocating d_remoteWeightedVx");
-    checkCudaError(cudaMalloc(&d_remoteWeightedVy, maxRemoteContributions * sizeof(T)), "Allocating d_remoteWeightedVy");
-    checkCudaError(cudaMalloc(&d_remoteWeightedVz, maxRemoteContributions * sizeof(T)), "Allocating d_remoteWeightedVz");
-    checkCudaError(cudaMalloc(&d_remoteCount, sizeof(int)), "Allocating d_remoteCount");
-
+    // ========== Local SPH Accumulation (targetRank == rank) ==========
     checkCudaError(cudaMalloc(&d_meshWeightSum, inboxSize * sizeof(T)), "Allocating d_meshWeightSum");
     checkCudaError(cudaMalloc(&d_meshWeightedVelX, inboxSize * sizeof(T)), "Allocating d_meshWeightedVelX");
     checkCudaError(cudaMalloc(&d_meshWeightedVelY, inboxSize * sizeof(T)), "Allocating d_meshWeightedVelY");
@@ -1179,15 +1274,9 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     checkCudaError(cudaMalloc(&d_meshVelZ, inboxSize * sizeof(T)), "Allocating d_meshVelZ");
 
     // ========== Copy Data to Device ==========
-    checkCudaError(cudaMemcpy(d_keys, keys.data(), numParticles * sizeof(KeyType), cudaMemcpyHostToDevice),
-                    "Copying keys to device");
-    checkCudaError(cudaMemcpy(d_x, x.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying x to device");
-    checkCudaError(cudaMemcpy(d_y, y.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying y to device");
-    checkCudaError(cudaMemcpy(d_z, z.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying z to device");
     checkCudaError(cudaMemcpy(d_vx, vx.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vx to device");
     checkCudaError(cudaMemcpy(d_vy, vy.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vy to device");
     checkCudaError(cudaMemcpy(d_vz, vz.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vz to device");
-    checkCudaError(cudaMemcpy(d_h, h.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying h to device");
 
     // Copy remaining mesh configuration (inboxLow and inboxHigh needed for compute kernel)
     // Note: d_inboxSize and d_procGrid already copied during counting phase
@@ -1198,82 +1287,70 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     checkCudaError(cudaMemcpy(d_inboxHigh, inboxHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
                     "Copying inbox high to device");
 
-    // Initialize counters and accumulation arrays
-    zeroCount = 0;
-    checkCudaError(cudaMemcpy(d_remoteCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
-                    "Initializing remote count");
+    // Initialize local accumulation arrays
     checkCudaError(cudaMemset(d_meshWeightSum, 0, inboxSize * sizeof(T)), "Initializing mesh weight sum");
     checkCudaError(cudaMemset(d_meshWeightedVelX, 0, inboxSize * sizeof(T)), "Initializing mesh weighted velX");
     checkCudaError(cudaMemset(d_meshWeightedVelY, 0, inboxSize * sizeof(T)), "Initializing mesh weighted velY");
     checkCudaError(cudaMemset(d_meshWeightedVelZ, 0, inboxSize * sizeof(T)), "Initializing mesh weighted velZ");
 
-    // ========== Launch SPH Contribution Kernel ==========
-    threadsPerBlock = 256;
-    blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
+    accumulateSPHForTargetRankKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
+        d_x, d_y, d_z, d_vx, d_vy, d_vz, d_h, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_,
+        d_procGrid, mesh.rank_, d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY, d_meshWeightedVelZ);
+    checkCudaError(cudaDeviceSynchronize(), "SPH local accumulation kernel execution");
 
-    computeSPHContributionsKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
-        d_keys, d_x, d_y, d_z, d_vx, d_vy, d_vz, d_h, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_,
-        d_inboxLow, d_inboxHigh, d_inboxSize, d_procGrid, mesh.rank_, d_meshWeightSum, d_meshWeightedVelX,
-        d_meshWeightedVelY, d_meshWeightedVelZ, d_remoteRanks, d_remoteIndices, d_remoteWeights,
-        d_remoteWeightedVx, d_remoteWeightedVy, d_remoteWeightedVz, d_remoteCount);
-
-    checkCudaError(cudaDeviceSynchronize(), "SPH contribution kernel execution");
-
-    // ========== Get Counts from Device ==========
-    int h_remoteCount;
-    checkCudaError(cudaMemcpy(&h_remoteCount, d_remoteCount, sizeof(int), cudaMemcpyDeviceToHost),
-                    "Copying remote count to host");
-
-    std::cout << "rank = " << mesh.rank_ << " remote count = " << h_remoteCount << std::endl;
-    
-    // Verify count matches (should be very close, small difference possible due to race conditions)
-    if (h_remoteCount > maxRemoteContributions)
+    // ========== Remote SPH Aggregation by Target Rank ==========
+    for (int targetRank = 0; targetRank < mesh.numRanks_; targetRank++)
     {
-        std::cerr << "ERROR: Remote contributions buffer overflow! Count = " << h_remoteCount 
-                  << " but buffer size = " << maxRemoteContributions << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
+        if (targetRank == mesh.rank_) continue;
 
-    // ========== Process Remote Contributions ==========
-    std::vector<int>      h_remoteRanks(h_remoteCount);
-    std::vector<uint64_t> h_remoteIndices(h_remoteCount);
-    std::vector<T>        h_remoteWeights(h_remoteCount);
-    std::vector<T>        h_remoteWeightedVx(h_remoteCount);
-    std::vector<T>        h_remoteWeightedVy(h_remoteCount);
-    std::vector<T>        h_remoteWeightedVz(h_remoteCount);
+        auto targetSize = rankInboxSizeHost(targetRank, mesh.gridDim_, mesh.proc_grid_.data());
+        uint64_t targetInboxSize = static_cast<uint64_t>(targetSize[0]) * targetSize[1] * targetSize[2];
+        if (targetInboxSize == 0) continue;
 
-    if (h_remoteCount > 0)
-    {
-        checkCudaError(
-            cudaMemcpy(h_remoteRanks.data(), d_remoteRanks, h_remoteCount * sizeof(int), cudaMemcpyDeviceToHost),
-            "Copying remote ranks to host");
-        checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices, h_remoteCount * sizeof(uint64_t),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote indices to host");
-        checkCudaError(cudaMemcpy(h_remoteWeights.data(), d_remoteWeights, h_remoteCount * sizeof(T),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote weights to host");
-        checkCudaError(cudaMemcpy(h_remoteWeightedVx.data(), d_remoteWeightedVx, h_remoteCount * sizeof(T),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote weighted vx to host");
-        checkCudaError(cudaMemcpy(h_remoteWeightedVy.data(), d_remoteWeightedVy, h_remoteCount * sizeof(T),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote weighted vy to host");
-        checkCudaError(cudaMemcpy(h_remoteWeightedVz.data(), d_remoteWeightedVz, h_remoteCount * sizeof(T),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote weighted vz to host");
-    }
+        T *d_remoteWeightSum = nullptr, *d_remoteWeightedVelX = nullptr, *d_remoteWeightedVelY = nullptr, *d_remoteWeightedVelZ = nullptr;
+        checkCudaError(cudaMalloc(&d_remoteWeightSum, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightSum");
+        checkCudaError(cudaMalloc(&d_remoteWeightedVelX, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelX");
+        checkCudaError(cudaMalloc(&d_remoteWeightedVelY, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelY");
+        checkCudaError(cudaMalloc(&d_remoteWeightedVelZ, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelZ");
+        checkCudaError(cudaMemset(d_remoteWeightSum, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightSum");
+        checkCudaError(cudaMemset(d_remoteWeightedVelX, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightedVelX");
+        checkCudaError(cudaMemset(d_remoteWeightedVelY, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightedVelY");
+        checkCudaError(cudaMemset(d_remoteWeightedVelZ, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightedVelZ");
 
-    // Organize remote data by rank
-    for (int i = 0; i < h_remoteCount; i++)
-    {
-        int targetRank = h_remoteRanks[i];
-        mesh.send_count[targetRank]++;
-        mesh.vdataSenderSPH[targetRank].send_index.push_back(h_remoteIndices[i]);
-        mesh.vdataSenderSPH[targetRank].send_weight.push_back(h_remoteWeights[i]);
-        mesh.vdataSenderSPH[targetRank].send_weighted_vx.push_back(h_remoteWeightedVx[i]);
-        mesh.vdataSenderSPH[targetRank].send_weighted_vy.push_back(h_remoteWeightedVy[i]);
-        mesh.vdataSenderSPH[targetRank].send_weighted_vz.push_back(h_remoteWeightedVz[i]);
+        accumulateSPHForTargetRankKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
+            d_x, d_y, d_z, d_vx, d_vy, d_vz, d_h, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_,
+            d_procGrid, targetRank, d_remoteWeightSum, d_remoteWeightedVelX, d_remoteWeightedVelY, d_remoteWeightedVelZ);
+        checkCudaError(cudaDeviceSynchronize(), "SPH remote rank aggregation kernel execution");
+
+        std::vector<T> h_remoteWeightSum(targetInboxSize);
+        std::vector<T> h_remoteWeightedVelX(targetInboxSize);
+        std::vector<T> h_remoteWeightedVelY(targetInboxSize);
+        std::vector<T> h_remoteWeightedVelZ(targetInboxSize);
+        checkCudaError(cudaMemcpy(h_remoteWeightSum.data(), d_remoteWeightSum, targetInboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                       "Copying aggregated remote weight sum");
+        checkCudaError(cudaMemcpy(h_remoteWeightedVelX.data(), d_remoteWeightedVelX, targetInboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                       "Copying aggregated remote weighted vx");
+        checkCudaError(cudaMemcpy(h_remoteWeightedVelY.data(), d_remoteWeightedVelY, targetInboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                       "Copying aggregated remote weighted vy");
+        checkCudaError(cudaMemcpy(h_remoteWeightedVelZ.data(), d_remoteWeightedVelZ, targetInboxSize * sizeof(T), cudaMemcpyDeviceToHost),
+                       "Copying aggregated remote weighted vz");
+
+        auto& sender = mesh.vdataSenderSPH[targetRank];
+        for (uint64_t idx = 0; idx < targetInboxSize; idx++)
+        {
+            if (h_remoteWeightSum[idx] <= T(0)) continue;
+            mesh.send_count[targetRank]++;
+            sender.send_index.push_back(idx);
+            sender.send_weight.push_back(h_remoteWeightSum[idx]);
+            sender.send_weighted_vx.push_back(h_remoteWeightedVelX[idx]);
+            sender.send_weighted_vy.push_back(h_remoteWeightedVelY[idx]);
+            sender.send_weighted_vz.push_back(h_remoteWeightedVelZ[idx]);
+        }
+
+        cudaFree(d_remoteWeightSum);
+        cudaFree(d_remoteWeightedVelX);
+        cudaFree(d_remoteWeightedVelY);
+        cudaFree(d_remoteWeightedVelZ);
     }
 
     std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
@@ -1422,13 +1499,6 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     cudaFree(d_inboxLow);
     cudaFree(d_inboxHigh);
     cudaFree(d_procGrid);
-    cudaFree(d_remoteRanks);
-    cudaFree(d_remoteIndices);
-    cudaFree(d_remoteWeights);
-    cudaFree(d_remoteWeightedVx);
-    cudaFree(d_remoteWeightedVy);
-    cudaFree(d_remoteWeightedVz);
-    cudaFree(d_remoteCount);
     cudaFree(d_meshWeightSum);
     cudaFree(d_meshWeightedVelX);
     cudaFree(d_meshWeightedVelY);
@@ -1490,15 +1560,17 @@ __global__ void classifyParticlesCellAvgKernel(KeyType* keys, T* vx, T* vy, T* v
     int      indexj  = util::get<1>(coords) / divisor;
     int      indexk  = util::get<2>(coords) / divisor;
 
-    int xBox       = indexi / inboxSize[0];
-    int yBox       = indexj / inboxSize[1];
-    int zBox       = indexk / inboxSize[2];
+    int xBox, yBox, zBox;
+    int xLocal, yLocal, zLocal;
+    int xSize, ySize, zSize;
+    decomposeGlobalIndex1D(indexi, gridDim, procGrid[0], xBox, xLocal, xSize);
+    decomposeGlobalIndex1D(indexj, gridDim, procGrid[1], yBox, yLocal, ySize);
+    decomposeGlobalIndex1D(indexk, gridDim, procGrid[2], zBox, zLocal, zSize);
     int targetRank = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
 
-    int      xLocal     = indexi % inboxSize[0];
-    int      yLocal     = indexj % inboxSize[1];
-    int      zLocal     = indexk % inboxSize[2];
-    uint64_t inboxIndex = xLocal + yLocal * inboxSize[0] + zLocal * inboxSize[0] * inboxSize[1];
+    uint64_t inboxIndex = static_cast<uint64_t>(xLocal) +
+                          static_cast<uint64_t>(yLocal) * xSize +
+                          static_cast<uint64_t>(zLocal) * xSize * ySize;
 
     if (targetRank == rank)
     {
