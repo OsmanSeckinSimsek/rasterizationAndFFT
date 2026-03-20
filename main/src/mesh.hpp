@@ -722,11 +722,38 @@ public:
         heffte::box3d<> outbox   = inbox_;
         uint64_t        meshSize = 1;
         meshSize                 = meshSize * gridDim_ * gridDim_ * gridDim_;
+        bool diagnosticsEnabled  = (std::getenv("PS_DIAGNOSTICS") != nullptr);
+
+        auto reportHostRealStats = [&](const char* tag, const T* data, uint64_t n) {
+            if (!diagnosticsEnabled) return;
+            T localSum = 0;
+            T localL2  = 0;
+            T localMax = 0;
+            for (uint64_t i = 0; i < n; i++)
+            {
+                T v = data[i];
+                localSum += v;
+                localL2 += v * v;
+                localMax = std::max(localMax, std::abs(v));
+            }
+            T globalSum = 0, globalL2 = 0, globalMax = 0;
+            MPI_Allreduce(&localSum, &globalSum, 1, MpiType<T>{}, MPI_SUM, MPI_COMM_WORLD);
+            MPI_Allreduce(&localL2, &globalL2, 1, MpiType<T>{}, MPI_SUM, MPI_COMM_WORLD);
+            MPI_Allreduce(&localMax, &globalMax, 1, MpiType<T>{}, MPI_MAX, MPI_COMM_WORLD);
+            if (rank_ == 0)
+            {
+                std::cout << "[diag] " << tag << " global_sum=" << globalSum
+                          << " global_l2=" << std::sqrt(globalL2)
+                          << " global_maxabs=" << globalMax << std::endl;
+            }
+        };
 
 #ifdef USE_CUDA
         // Use CUDA backend for GPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::cufft>();
         options.use_pencils          = usePencils_;
+        options.use_reorder          = true;
+        options.use_alltoall         = false;
 
         heffte::fft3d<heffte::backend::cufft> fft(inbox_, outbox, MPI_COMM_WORLD, options);
 
@@ -737,6 +764,8 @@ public:
 
         // Use existing GPU data if available (from CUDA rasterization), otherwise allocate and copy
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
+        uint64_t fftInSize = fft.size_inbox();
+        uint64_t fftOutSize = fft.size_outbox();
         T* d_velX, *d_velY, *d_velZ;
 
         cudaError_t err;
@@ -766,54 +795,169 @@ public:
             if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         }
         
-        // heffte::fft3d<cufft> requires complex input.  Passing a raw T* (double*)
-        // causes the cuFFT backend to operate in-place on the input buffer and leave
-        // d_output untouched (all zeros).  We therefore explicitly promote each real
-        // velocity component to complex<T> (imaginary = 0) before calling forward().
-        //
-        // In the multi-rank case with outbox == inbox_, heFFTe performs an extra
-        // back-transpose to redistribute the FFT result back to the inbox layout.
-        // During this step heFFTe writes the final output into the INPUT buffer
-        // (d_input_cplx) rather than a separate output buffer — leaving a separate
-        // d_output all-zeros.  Using d_input_cplx as both input and output (in-place
-        // FFT) ensures the result is always in d_input_cplx regardless of rank count.
+        auto reportDeviceRealStats = [&](const char* tag, T* d_data, uint64_t n) {
+            if (!diagnosticsEnabled) return;
+            std::vector<T> host(n);
+            cudaError_t copyErr = cudaMemcpy(host.data(), d_data, n * sizeof(T), cudaMemcpyDeviceToHost);
+            if (copyErr != cudaSuccess)
+            {
+                std::cerr << "CUDA Error copying diagnostics buffer (" << tag << "): "
+                          << cudaGetErrorString(copyErr) << std::endl;
+                std::exit(EXIT_FAILURE);
+            }
+            reportHostRealStats(tag, host.data(), n);
+        };
+
+        auto reportDeviceComplexEnergy = [&](const char* tag, std::complex<T>* d_data, uint64_t n) {
+            if (!diagnosticsEnabled) return;
+            std::vector<std::complex<T>> host(n);
+            cudaError_t copyErr = cudaMemcpy(host.data(), d_data, n * sizeof(std::complex<T>), cudaMemcpyDeviceToHost);
+            if (copyErr != cudaSuccess)
+            {
+                std::cerr << "CUDA Error copying complex diagnostics buffer (" << tag << "): "
+                          << cudaGetErrorString(copyErr) << std::endl;
+                std::exit(EXIT_FAILURE);
+            }
+            T localEnergy = 0;
+            T localMaxAbs = 0;
+            for (const auto& c : host)
+            {
+                T e = c.real() * c.real() + c.imag() * c.imag();
+                localEnergy += e;
+                localMaxAbs = std::max(localMaxAbs, std::sqrt(e));
+            }
+            T globalEnergy = 0;
+            T globalMaxAbs = 0;
+            MPI_Allreduce(&localEnergy, &globalEnergy, 1, MpiType<T>{}, MPI_SUM, MPI_COMM_WORLD);
+            MPI_Allreduce(&localMaxAbs, &globalMaxAbs, 1, MpiType<T>{}, MPI_MAX, MPI_COMM_WORLD);
+            if (rank_ == 0)
+            {
+                std::cout << "[diag] " << tag
+                          << " global_sum_abs2=" << globalEnergy
+                          << " global_max_abs=" << globalMaxAbs << std::endl;
+            }
+        };
+
+        reportDeviceRealStats("gpu_pre_fft_velX", d_velX, inboxSize);
+        reportDeviceRealStats("gpu_pre_fft_velY", d_velY, inboxSize);
+        reportDeviceRealStats("gpu_pre_fft_velZ", d_velZ, inboxSize);
+
+        // Multi-rank cuFFT path can silently produce zero spectra on stacks without
+        // reliable GPU-aware MPI transport. Use distributed FFTW for correctness,
+        // then copy per-component power back to device for GPU spherical averaging.
+        if (numRanks_ > 1)
+        {
+            err = cudaMemcpy(velX_.data(), d_velX, inboxSize * sizeof(T), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velX to host for FFTW fallback: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(velY_.data(), d_velY, inboxSize * sizeof(T), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velY to host for FFTW fallback: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(velZ_.data(), d_velZ, inboxSize * sizeof(T), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velZ to host for FFTW fallback: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+
+            heffte::plan_options optionsCpu = heffte::default_options<heffte::backend::fftw>();
+            optionsCpu.use_pencils          = usePencils_;
+            heffte::fft3d<heffte::backend::fftw> fftCpu(inbox_, outbox, MPI_COMM_WORLD, optionsCpu);
+            std::vector<std::complex<T>> outputCpu(fftCpu.size_outbox());
+
+            fftCpu.forward(velX_.data(), outputCpu.data(), heffte::scale::none);
+#pragma omp parallel for
+            for (uint64_t i = 0; i < velX_.size(); i++)
+            {
+                T out    = abs(outputCpu.at(i)) / meshSize;
+                velX_[i] = out * out;
+            }
+
+            fftCpu.forward(velY_.data(), outputCpu.data(), heffte::scale::none);
+#pragma omp parallel for
+            for (uint64_t i = 0; i < velY_.size(); i++)
+            {
+                T out    = abs(outputCpu.at(i)) / meshSize;
+                velY_[i] = out * out;
+            }
+
+            fftCpu.forward(velZ_.data(), outputCpu.data(), heffte::scale::none);
+#pragma omp parallel for
+            for (uint64_t i = 0; i < velZ_.size(); i++)
+            {
+                T out    = abs(outputCpu.at(i)) / meshSize;
+                velZ_[i] = out * out;
+            }
+
+            err = cudaMemcpy(d_velX, velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velX to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(d_velY, velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velY to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(d_velZ, velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velZ to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+
+            reportDeviceRealStats("gpu_post_fft_power_velX", d_velX, inboxSize);
+            reportDeviceRealStats("gpu_post_fft_power_velY", d_velY, inboxSize);
+            reportDeviceRealStats("gpu_post_fft_power_velZ", d_velZ, inboxSize);
+
+            if (!gpuDataValid_ || !d_velX_ || !d_velY_ || !d_velZ_)
+            {
+                if (d_velX_) cudaFree(d_velX_);
+                if (d_velY_) cudaFree(d_velY_);
+                if (d_velZ_) cudaFree(d_velZ_);
+                d_velX_ = d_velX;
+                d_velY_ = d_velY;
+                d_velZ_ = d_velZ;
+            }
+            gpuDataValid_ = true;
+            return;
+        }
+
+        if (fftOutSize != inboxSize)
+        {
+            std::cerr << "Unexpected FFT outbox size mismatch: fftOutSize=" << fftOutSize
+                      << " inboxSize=" << inboxSize << std::endl;
+            std::exit(EXIT_FAILURE);
+        }
+
         std::complex<T>* d_input_cplx = nullptr;
-        err = cudaMalloc(&d_input_cplx, inboxSize * sizeof(std::complex<T>));
+        std::complex<T>* d_output_cplx = nullptr;
+        std::complex<T>* d_workspace_cplx = nullptr;
+        err = cudaMalloc(&d_input_cplx, fftInSize * sizeof(std::complex<T>));
         if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_input_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        err = cudaMalloc(&d_output_cplx, fftOutSize * sizeof(std::complex<T>));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_output_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        uint64_t workspaceSize = fft.size_workspace();
+        err = cudaMalloc(&d_workspace_cplx, workspaceSize * sizeof(std::complex<T>));
+        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_workspace_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
 
         int threadsPerBlock = 256;
         int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
         T   meshSizeT     = static_cast<T>(meshSize);
 
-        // Helper lambda: zero imaginary parts, copy real velocities, then in-place
-        // FFT + power spectrum.  d_input_cplx serves as both input and output so
-        // the result is always available in d_input_cplx after forward().
-        auto fftComponent = [&](T* d_vel) {
-            // Zero the complex buffer (sets both re and im to 0).
-            cudaMemset(d_input_cplx, 0, inboxSize * sizeof(std::complex<T>));
-            // Copy real velocities into the real part of each complex element.
-            // cudaMemcpy2D: dst stride = sizeof(complex<T>), src stride = sizeof(T),
-            // so d_input_cplx[i].re = d_vel[i], d_input_cplx[i].im stays 0.
-            cudaMemcpy2D(d_input_cplx,            sizeof(std::complex<T>),
-                         d_vel,                   sizeof(T),
-                         sizeof(T),               inboxSize,
-                         cudaMemcpyDeviceToDevice);
+        // Helper lambda: explicit pointer API with external workspace.
+        auto fftComponent = [&](T* d_vel, const char* name) {
+            cudaMemset(d_input_cplx, 0, fftInSize * sizeof(std::complex<T>));
+            err = cudaMemcpy2D(d_input_cplx,            sizeof(std::complex<T>),
+                               d_vel,                   sizeof(T),
+                               sizeof(T),               fftInSize,
+                               cudaMemcpyDeviceToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error packing FFT real input: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
 
-            // In-place FFT: input == output, result written back to d_input_cplx.
-            fft.forward(d_input_cplx, d_input_cplx);
+            fft.forward(d_input_cplx, d_output_cplx, d_workspace_cplx, heffte::scale::none);
             err = cudaDeviceSynchronize();
             if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            reportDeviceComplexEnergy("gpu_fft_output_abs2", d_output_cplx, fftOutSize);
+            reportDeviceComplexEnergy("gpu_fft_input_abs2", d_input_cplx, fftInSize);
+            reportDeviceComplexEnergy("gpu_fft_workspace_abs2", d_workspace_cplx, workspaceSize);
 
-            launchComputePowerSpectrumKernel(d_input_cplx, d_vel, inboxSize, meshSizeT, blocksPerGrid, threadsPerBlock);
+            launchComputePowerSpectrumKernel(d_output_cplx, d_vel, fftOutSize, meshSizeT, blocksPerGrid, threadsPerBlock);
             err = cudaDeviceSynchronize();
             if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            reportDeviceRealStats(name, d_vel, inboxSize);
         };
 
-        fftComponent(d_velX);
-        fftComponent(d_velY);
-        fftComponent(d_velZ);
+        fftComponent(d_velX, "gpu_post_fft_power_velX");
+        fftComponent(d_velY, "gpu_post_fft_power_velY");
+        fftComponent(d_velZ, "gpu_post_fft_power_velZ");
 
         cudaFree(d_input_cplx);
+        cudaFree(d_output_cplx);
+        cudaFree(d_workspace_cplx);
 
         // Keep per-component power spectrum on device for GPU spherical averaging.
         // If d_velX/Y/Z were locally allocated (CPU rasterization path), transfer
@@ -843,8 +987,12 @@ public:
 
         std::vector<std::complex<T>> output(fft.size_outbox());
 
+        reportHostRealStats("cpu_pre_fft_velX", velX_.data(), velX_.size());
+        reportHostRealStats("cpu_pre_fft_velY", velY_.data(), velY_.size());
+        reportHostRealStats("cpu_pre_fft_velZ", velZ_.data(), velZ_.size());
+
         // divide the fft.forward results by the mesh size as the first step of normalization
-        fft.forward(velX_.data(), output.data());
+        fft.forward(velX_.data(), output.data(), heffte::scale::none);
 
 #pragma omp parallel for
         for (uint64_t i = 0; i < velX_.size(); i++)
@@ -852,8 +1000,9 @@ public:
             T out    = abs(output.at(i)) / meshSize;
             velX_[i] = out * out;
         }
+        reportHostRealStats("cpu_post_fft_power_velX", velX_.data(), velX_.size());
 
-        fft.forward(velY_.data(), output.data());
+        fft.forward(velY_.data(), output.data(), heffte::scale::none);
 
 #pragma omp parallel for
         for (uint64_t i = 0; i < velY_.size(); i++)
@@ -861,8 +1010,9 @@ public:
             T out    = abs(output.at(i)) / meshSize;
             velY_[i] = out * out;
         }
+        reportHostRealStats("cpu_post_fft_power_velY", velY_.data(), velY_.size());
 
-        fft.forward(velZ_.data(), output.data());
+        fft.forward(velZ_.data(), output.data(), heffte::scale::none);
 
 #pragma omp parallel for
         for (uint64_t i = 0; i < velZ_.size(); i++)
@@ -870,6 +1020,7 @@ public:
             T out    = abs(output.at(i)) / meshSize;
             velZ_[i] = out * out;
         }
+        reportHostRealStats("cpu_post_fft_power_velZ", velZ_.data(), velZ_.size());
 #endif
     }
 
@@ -1289,24 +1440,64 @@ public:
 
     inline int calculateRankFromMeshCoord(int i, int j, int k)
     {
-        int xBox = i / inbox_.size[0];
-        int yBox = j / inbox_.size[1];
-        int zBox = k / inbox_.size[2];
+        auto decompose1d = [](int g, int dim, int nBoxes, int& box, int& local, int& boxSize) {
+            int base   = dim / nBoxes;
+            int rem    = dim % nBoxes;
+            int cutoff = (base + 1) * rem;
+            if (g < cutoff)
+            {
+                boxSize = base + 1;
+                box     = g / boxSize;
+                local   = g - box * boxSize;
+            }
+            else
+            {
+                boxSize = base;
+                int shifted = g - cutoff;
+                box   = rem + shifted / boxSize;
+                local = shifted - (box - rem) * boxSize;
+            }
+        };
 
-        int rank = xBox + yBox * proc_grid_[0] + zBox * proc_grid_[0] * proc_grid_[1];
+        int xBox, yBox, zBox;
+        int xLocal, yLocal, zLocal;
+        int xSize, ySize, zSize;
+        decompose1d(i, gridDim_, proc_grid_[0], xBox, xLocal, xSize);
+        decompose1d(j, gridDim_, proc_grid_[1], yBox, yLocal, ySize);
+        decompose1d(k, gridDim_, proc_grid_[2], zBox, zLocal, zSize);
 
-        return rank;
+        return xBox + yBox * proc_grid_[0] + zBox * proc_grid_[0] * proc_grid_[1];
     }
 
     inline int calculateInboxIndexFromMeshCoord(int i, int j, int k)
     {
-        int xBox = i % inbox_.size[0];
-        int yBox = j % inbox_.size[1];
-        int zBox = k % inbox_.size[2];
+        auto decompose1d = [](int g, int dim, int nBoxes, int& box, int& local, int& boxSize) {
+            int base   = dim / nBoxes;
+            int rem    = dim % nBoxes;
+            int cutoff = (base + 1) * rem;
+            if (g < cutoff)
+            {
+                boxSize = base + 1;
+                box     = g / boxSize;
+                local   = g - box * boxSize;
+            }
+            else
+            {
+                boxSize = base;
+                int shifted = g - cutoff;
+                box   = rem + shifted / boxSize;
+                local = shifted - (box - rem) * boxSize;
+            }
+        };
 
-        int index = xBox + yBox * inbox_.size[0] + zBox * inbox_.size[0] * inbox_.size[1];
+        int xBox, yBox, zBox;
+        int xLocal, yLocal, zLocal;
+        int xSize, ySize, zSize;
+        decompose1d(i, gridDim_, proc_grid_[0], xBox, xLocal, xSize);
+        decompose1d(j, gridDim_, proc_grid_[1], yBox, yLocal, ySize);
+        decompose1d(k, gridDim_, proc_grid_[2], zBox, zLocal, zSize);
 
-        return index;
+        return xLocal + yLocal * xSize + zLocal * xSize * ySize;
     }
 
     std::tuple<int, int, int> calculateKeyIndices(KeyType key, int gridDim)

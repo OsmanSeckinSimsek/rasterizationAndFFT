@@ -409,9 +409,9 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         mesh.vdataSender[targetRank].send_vz.push_back(h_remoteVz[i]);
     }
 
-    std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
-    for (int i = 0; i < mesh.numRanks_; i++)
-        std::cout << "rank = " << mesh.rank_ << " send_count = " << mesh.send_count[i] << std::endl;
+    // std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
+    // for (int i = 0; i < mesh.numRanks_; i++)
+    //     std::cout << "rank = " << mesh.rank_ << " send_count = " << mesh.send_count[i] << std::endl;
 
     // ========== MPI Communication ==========
     MPI_Alltoall(mesh.send_count.data(), 1, MpiType<int>{}, mesh.recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
@@ -1353,9 +1353,9 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
         cudaFree(d_remoteWeightedVelZ);
     }
 
-    std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
-    for (int i = 0; i < mesh.numRanks_; i++)
-        std::cout << "rank = " << mesh.rank_ << " send_count = " << mesh.send_count[i] << std::endl;
+    // std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
+    // for (int i = 0; i < mesh.numRanks_; i++)
+    //     std::cout << "rank = " << mesh.rank_ << " send_count = " << mesh.send_count[i] << std::endl;
 
     // ========== MPI Communication ==========
     MPI_Alltoall(mesh.send_count.data(), 1, MpiType<int>{}, mesh.recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
@@ -2005,21 +2005,9 @@ __global__ void sphericalAveragingKernel(T* freqVelo, T* k_values, T* k_1d, T* p
                    k_values[k_index_j] * k_values[k_index_j] +
                    k_values[k_index_k] * k_values[k_index_k]);
     
-    // Find closest k_1d bin
-    T minDiff = fabs(k_1d[0] - kdist);
-    uint64_t k_index = 0;
-    for (int kind = 1; kind < gridDim; kind++)
-    {
-        T diff = fabs(k_1d[kind] - kdist);
-        if (diff < minDiff)
-        {
-            minDiff = diff;
-            k_index = kind;
-        }
-    }
-    
-    // Clamp k_index to valid range
-    if (k_index >= static_cast<uint64_t>(numShells)) k_index = numShells - 1;
+    // Match CPU binning exactly: shell index = round(|k|), clamped to [0, numShells-1].
+    uint64_t k_index = static_cast<uint64_t>(round(kdist));
+    if (k_index >= static_cast<uint64_t>(numShells)) k_index = static_cast<uint64_t>(numShells - 1);
     
     // Atomic accumulation
     atomicAdd(&ps_rad[k_index], freqVelo[freq_index]);

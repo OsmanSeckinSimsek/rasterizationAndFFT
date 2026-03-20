@@ -193,9 +193,9 @@ int main(int argc, char** argv)
     Domain               domain(rank, numRanks, bucketSize, bucketSizeFocus, theta, box);
 
     domain.sync(keys, x, y, z, h, std::tie(vx, vy, vz), std::tie(scratch1, scratch2, scratch3));
-    std::cout << "rank = " << rank << " numLocalParticles after sync = " << domain.nParticles() << std::endl;
-    std::cout << "rank = " << rank << " numLocalParticleswithHalos after sync = " << domain.nParticlesWithHalos()
-              << std::endl;
+    // std::cout << "rank = " << rank << " numLocalParticles after sync = " << domain.nParticles() << std::endl;
+    // std::cout << "rank = " << rank << " numLocalParticleswithHalos after sync = " << domain.nParticlesWithHalos()
+    //           << std::endl;
     // std::cout << "rank = " << rank << " keys size after sync = " << keys.size() << std::endl;
     // std::cout << "rank = " << rank << " keys.begin = " << *keys.begin() << " keys.end = " << *keys.end() <<
     // std::endl;
