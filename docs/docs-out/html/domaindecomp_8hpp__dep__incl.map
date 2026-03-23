@@ -1,0 +1,29 @@
+<map id="domaindecomp.hpp" name="domaindecomp.hpp">
+<area shape="rect" id="Node000001" title="Functions to assign a global cornerstone octree to different ranks." alt="" coords="335,5,485,31"/>
+<area shape="rect" id="Node000002" href="$layout_8hpp.html" title="Utility functions for determining the layout of particle buffers on a given rank." alt="" coords="309,79,399,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="394,43,365,80,361,77,390,40"/>
+<area shape="rect" id="Node000011" href="$peers_8hpp.html" title="Functions for finding peer ranks for point to point communication in global domains." alt="" coords="537,79,624,104"/>
+<area shape="poly" id="edge15_Node000001_Node000011" title=" " alt="" coords="451,33,554,76,552,81,449,38"/>
+<area shape="rect" id="Node000003" href="$assignment_8hpp.html" title="Implementation of global particle assignment and distribution." alt="" coords="5,152,132,177"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="296,110,116,154,114,149,294,105"/>
+<area shape="rect" id="Node000004" href="$domain_8hpp.html" title="A domain class to manage distributed particles and their halos." alt="" coords="305,225,403,251"/>
+<area shape="poly" id="edge8_Node000002_Node000004" title=" " alt="" coords="296,101,269,108,242,118,217,133,198,153,192,168,194,180,203,191,218,201,260,217,305,227,304,232,258,222,216,206,200,195,189,182,186,167,193,151,214,129,239,113,267,102,294,96"/>
+<area shape="rect" id="Node000008" href="$exchange__keys_8hpp.html" title="Send/receive SFC key ranges to let peer ranks know which particles to send as halos." alt="" coords="208,152,359,177"/>
+<area shape="poly" id="edge9_Node000002_Node000008" title=" " alt="" coords="335,116,297,154,293,150,331,112"/>
+<area shape="rect" id="Node000009" href="$halos_8hpp.html" title="Implementation of halo discovery and halo exchange." alt="" coords="383,152,469,177"/>
+<area shape="poly" id="edge11_Node000002_Node000009" title=" " alt="" coords="378,112,416,150,412,154,374,116"/>
+<area shape="rect" id="Node000010" href="$octree__focus__mpi_8hpp.html" title="Traits and functors for the MPI&#45;enabled FocusedOctree." alt="" coords="493,152,658,177"/>
+<area shape="poly" id="edge13_Node000002_Node000010" title=" " alt="" coords="403,106,540,149,539,154,402,111"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="128,178,308,223,307,228,127,183"/>
+<area shape="rect" id="Node000005" href="$domain__minimal_8cpp.html" title=" " alt="" coords="128,299,287,324"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="320,259,232,301,230,296,317,254"/>
+<area shape="rect" id="Node000006" href="$mesh_8hpp.html" title=" " alt="" coords="311,299,397,324"/>
+<area shape="poly" id="edge5_Node000004_Node000006" title=" " alt="" coords="357,264,357,299,351,299,351,264"/>
+<area shape="rect" id="Node000007" href="$power__spectrum_8cpp.html" title=" " alt="" coords="315,372,473,397"/>
+<area shape="poly" id="edge7_Node000004_Node000007" title=" " alt="" coords="382,258,398,276,411,298,415,318,413,339,402,373,397,371,408,338,410,318,406,300,394,279,378,262"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="370,335,390,371,385,373,365,338"/>
+<area shape="poly" id="edge10_Node000008_Node000004" title=" " alt="" coords="307,185,344,223,341,227,303,189"/>
+<area shape="poly" id="edge12_Node000009_Node000004" title=" " alt="" coords="406,189,368,227,364,223,402,185"/>
+<area shape="poly" id="edge14_Node000010_Node000004" title=" " alt="" coords="528,184,391,228,389,223,526,179"/>
+<area shape="poly" id="edge16_Node000011_Node000004" title=" " alt="" coords="622,108,647,121,668,138,678,158,678,169,672,179,654,193,627,205,555,222,475,232,404,237,404,232,474,227,554,217,625,200,651,189,668,176,673,167,673,159,664,142,644,126,620,112"/>
+</map>

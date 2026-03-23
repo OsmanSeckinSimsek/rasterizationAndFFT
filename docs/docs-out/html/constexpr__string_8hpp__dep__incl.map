@@ -1,0 +1,9 @@
+<map id="constexpr_string.hpp" name="constexpr_string.hpp">
+<area shape="rect" id="Node000001" title="Constexpr string based on C++20 structural types." alt="" coords="125,5,284,31"/>
+<area shape="rect" id="Node000002" href="$enumerate_8hpp.html" title="Generation of compile&#45;time const char* arrays of field names." alt="" coords="5,79,127,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="172,39,90,81,87,76,169,34"/>
+<area shape="rect" id="Node000003" href="$field__get_8hpp.html" title="Utility functions to use compile&#45;time strings as arguments to get on tuples." alt="" coords="151,79,258,104"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="207,44,207,79,202,79,202,44"/>
+<area shape="rect" id="Node000004" href="$value__list_8hpp.html" title="Utility functions to use compile&#45;time strings as arguments to get on tuples." alt="" coords="283,79,396,104"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="240,35,319,76,316,81,237,39"/>
+</map>

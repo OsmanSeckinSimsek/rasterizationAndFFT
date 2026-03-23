@@ -1,0 +1,7 @@
+<map id="tuple.hpp" name="tuple.hpp">
+<area shape="rect" id="Node000001" title="Wrapper around different types of tuples compatible with device code." alt="" coords="67,5,150,31"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,79,60,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="98,33,57,71,53,67,95,29"/>
+<area shape="rect" id="Node000003" href="$annotation_8hpp.html" title="Defines macros for enabling device code compilation." alt="" coords="85,79,287,104"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="123,29,165,67,161,71,119,33"/>
+</map>

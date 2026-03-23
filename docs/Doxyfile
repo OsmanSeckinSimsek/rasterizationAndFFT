@@ -1,0 +1,32 @@
+# Doxygen configuration for rasterizationAndFFT / Cornerstone API
+PROJECT_NAME           = "rasterizationAndFFT + Cornerstone API"
+PROJECT_BRIEF          = "Distributed octree domain, rasterization, and FFT utilities"
+OUTPUT_DIRECTORY       = docs-out
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+QUIET                  = YES
+JAVADOC_AUTOBRIEF      = YES
+RECURSIVE              = YES
+INPUT                  = \
+  ../cstone/include \
+  ../main/src \
+  ../extern/io \
+  ../README.md \
+  ../cstone/README.md \
+  ./pages \
+  ./examples
+FILE_PATTERNS          = *.hpp *.h *.cuh *.cu *.cpp *.md
+USE_MDFILE_AS_MAINPAGE = pages/index.md
+ALIASES               += example{2}="<b>Example</b>\\n<pre>\1</pre><br>\\n<pre>\2</pre>"
+SORT_MEMBER_DOCS       = YES
+GENERATE_TREEVIEW      = YES
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+INLINE_SOURCES         = NO
+STRIP_FROM_PATH        = ../
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+FULL_PATH_NAMES        = NO

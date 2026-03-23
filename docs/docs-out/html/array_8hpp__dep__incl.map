@@ -1,0 +1,153 @@
+<map id="array.hpp" name="array.hpp">
+<area shape="rect" id="Node000001" title="implementation of a compile&#45;time size array that can be used on the host and device" alt="" coords="1982,5,2065,31"/>
+<area shape="rect" id="Node000002" href="$definitions_8h.html" title=" " alt="" coords="813,79,916,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="1968,25,916,90,916,84,1968,20"/>
+<area shape="rect" id="Node000015" href="$source__center_8hpp.html" title="Compute leaf cell source centers based on local information." alt="" coords="1563,665,1703,691"/>
+<area shape="poly" id="edge105_Node000001_Node000015" title=" " alt="" coords="2026,44,2026,163,2026,533,2024,581,2017,600,2000,619,1978,633,1948,644,1870,660,1783,671,1703,677,1703,671,1782,666,1869,655,1946,639,1976,628,1996,615,2012,597,2019,579,2021,533,2021,163,2021,44"/>
+<area shape="rect" id="Node000016" href="$findneighbors_8hpp.html" title="Find neighbors in Morton code sorted x,y,z arrays." alt="" coords="1829,739,1967,764"/>
+<area shape="poly" id="edge104_Node000001_Node000016" title=" " alt="" coords="2066,34,2102,55,2139,83,2167,119,2175,141,2178,163,2178,606,2172,639,2157,667,2133,690,2104,708,2070,722,2035,733,1968,746,1967,741,2034,728,2069,717,2101,703,2130,686,2152,664,2167,637,2173,606,2173,164,2170,142,2162,122,2135,87,2099,59,2063,39"/>
+<area shape="rect" id="Node000003" href="$box_8hpp.html" title="implements a bounding bounding box for floating point coordinates and integer indices" alt="" coords="1338,152,1413,177"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="930,99,1338,155,1337,161,929,104"/>
+<area shape="poly" id="edge87_Node000002_Node000016" title=" " alt="" coords="930,94,1135,107,1410,133,1550,150,1680,171,1790,195,1871,223,1931,251,1976,278,2012,315,2044,371,2059,417,2060,456,2045,544,2041,583,2028,619,2002,657,1971,692,1916,740,1912,736,1968,688,1998,654,2024,616,2036,582,2039,544,2054,455,2054,418,2040,373,2008,318,1973,282,1928,256,1869,228,1788,200,1679,176,1549,156,1409,138,1135,113,929,99"/>
+<area shape="rect" id="Node000031" href="$btree_8hpp.html" title=" " alt="" coords="641,225,725,251"/>
+<area shape="poly" id="edge58_Node000002_Node000031" title=" " alt="" coords="801,106,753,124,730,137,711,154,699,171,692,190,686,226,681,225,687,189,694,168,707,150,727,133,750,119,799,101"/>
+<area shape="rect" id="Node000032" href="$buffer__description_8hpp.html" title="Buffer description and management for domain decomposition particle exchanges." alt="" coords="61,519,228,544"/>
+<area shape="poly" id="edge59_Node000002_Node000032" title=" " alt="" coords="800,96,637,103,539,111,441,123,351,142,276,166,248,181,227,198,213,216,209,237,209,386,203,426,188,464,156,520,151,517,184,462,198,425,203,386,203,236,208,214,223,194,245,177,274,161,349,136,440,118,538,105,637,97,799,91"/>
+<area shape="rect" id="Node000035" href="$common_8hpp.html" title="Common operations on SFC keys that do not depend on the specific SFC used." alt="" coords="721,152,827,177"/>
+<area shape="poly" id="edge64_Node000002_Node000035" title=" " alt="" coords="841,115,790,154,787,150,838,110"/>
+<area shape="rect" id="Node000037" href="$csarray_8hpp.html" title="Generation of local and global octrees in cornerstone format." alt="" coords="773,372,869,397"/>
+<area shape="poly" id="edge86_Node000002_Node000037" title=" " alt="" coords="864,118,825,372,820,371,858,117"/>
+<area shape="rect" id="Node000042" href="$gather_8hpp.html" title="Functionality for calculating for performing gather operations on the CPU." alt="" coords="1187,372,1278,397"/>
+<area shape="poly" id="edge88_Node000002_Node000042" title=" " alt="" coords="891,110,1220,370,1216,374,888,115"/>
+<area shape="rect" id="Node000044" href="$index__ranges_8hpp.html" title="Utility class to express ranges of indices." alt="" coords="525,445,663,471"/>
+<area shape="poly" id="edge94_Node000002_Node000044" title=" " alt="" coords="800,103,737,117,674,142,647,160,625,181,611,207,606,237,606,313,603,388,598,445,593,445,598,388,601,313,601,236,606,205,621,178,643,155,671,137,735,112,799,97"/>
+<area shape="rect" id="Node000045" href="$rebalance__gpu_8h.html" title="Focused octree rebalance on GPUs." alt="" coords="903,299,1032,324"/>
+<area shape="poly" id="edge100_Node000002_Node000045" title=" " alt="" coords="879,116,964,297,959,299,874,118"/>
+<area shape="rect" id="Node000046" href="$source__center__gpu_8h.html" title="Compute cell mass centers for use in focus tree." alt="" coords="348,225,504,251"/>
+<area shape="poly" id="edge102_Node000002_Node000046" title=" " alt="" coords="800,104,698,123,641,137,586,154,506,192,445,228,442,223,503,187,584,150,639,132,697,118,799,99"/>
+<area shape="rect" id="Node000004" href="$box__mpi_8hpp.html" title="compute global minima and maxima of array ranges" alt="" coords="1879,592,1986,617"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="1427,166,1564,176,1648,186,1733,200,1811,219,1876,242,1902,257,1921,272,1934,290,1938,310,1938,459,1936,592,1930,592,1933,459,1933,310,1929,292,1917,276,1899,261,1874,247,1810,224,1732,205,1648,191,1564,181,1426,171"/>
+<area shape="rect" id="Node000010" href="$boxoverlap_8hpp.html" title="(halo&#45;)box overlap functionality" alt="" coords="1515,445,1638,471"/>
+<area shape="poly" id="edge11_Node000003_Node000010" title=" " alt="" coords="1405,184,1463,231,1493,263,1520,297,1542,337,1559,379,1577,444,1572,446,1554,381,1537,340,1516,300,1489,266,1459,235,1402,188"/>
+<area shape="rect" id="Node000022" href="$continuum_8hpp.html" title="Generation of octrees in cornerstone format based on particle concentration functions." alt="" coords="1001,445,1120,471"/>
+<area shape="poly" id="edge33_Node000003_Node000022" title=" " alt="" coords="1355,188,1075,447,1071,443,1351,185"/>
+<area shape="rect" id="Node000023" href="$morton_8hpp.html" title="3D Morton encoding/decoding in 32&#45; and 64&#45;bit using the magic number method" alt="" coords="1327,225,1424,251"/>
+<area shape="poly" id="edge34_Node000003_Node000023" title=" " alt="" coords="1378,191,1378,225,1373,225,1373,191"/>
+<area shape="rect" id="Node000005" href="$assignment_8hpp.html" title="Implementation of global particle assignment and distribution." alt="" coords="728,665,855,691"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="1866,613,855,675,855,670,1866,607"/>
+<area shape="rect" id="Node000006" href="$domain_8hpp.html" title="A domain class to manage distributed particles and their halos." alt="" coords="1341,812,1439,837"/>
+<area shape="poly" id="edge10_Node000004_Node000006" title=" " alt="" coords="1953,627,1973,657,1990,693,1995,713,1996,732,1992,750,1981,766,1952,780,1899,792,1747,809,1576,820,1440,825,1440,819,1576,814,1747,804,1898,787,1950,775,1978,762,1987,747,1990,731,1990,713,1985,695,1969,660,1949,630"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="853,691,1343,809,1342,815,851,697"/>
+<area shape="rect" id="Node000007" href="$domain__minimal_8cpp.html" title=" " alt="" coords="1193,885,1352,911"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="1361,847,1293,887,1290,883,1358,842"/>
+<area shape="rect" id="Node000008" href="$mesh_8hpp.html" title=" " alt="" coords="1428,885,1515,911"/>
+<area shape="poly" id="edge7_Node000006_Node000008" title=" " alt="" coords="1415,844,1460,883,1456,887,1412,848"/>
+<area shape="rect" id="Node000009" href="$power__spectrum_8cpp.html" title=" " alt="" coords="1351,959,1509,984"/>
+<area shape="poly" id="edge9_Node000006_Node000009" title=" " alt="" coords="1399,850,1429,958,1424,959,1394,852"/>
+<area shape="poly" id="edge8_Node000008_Node000009" title=" " alt="" coords="1460,924,1439,960,1434,957,1455,921"/>
+<area shape="rect" id="Node000011" href="$macs_8hpp.html" title="Evaluate multipole acceptance criteria (MAC) on octree nodes." alt="" coords="1559,592,1645,617"/>
+<area shape="poly" id="edge12_Node000010_Node000011" title=" " alt="" coords="1590,482,1602,518,1606,559,1606,592,1600,592,1601,559,1597,519,1585,484"/>
+<area shape="rect" id="Node000017" href="$rebalance_8hpp.html" title="Focused octree rebalance." alt="" coords="1114,519,1229,544"/>
+<area shape="poly" id="edge21_Node000010_Node000017" title=" " alt="" coords="1502,475,1229,523,1228,517,1501,470"/>
+<area shape="rect" id="Node000018" href="$traversal_8hpp.html" title="Generic octree traversal methods." alt="" coords="1435,519,1543,544"/>
+<area shape="poly" id="edge23_Node000010_Node000018" title=" " alt="" coords="1554,481,1505,521,1501,516,1550,477"/>
+<area shape="rect" id="Node000012" href="$octree__focus_8hpp.html" title="Generation of locally essential global octrees in cornerstone format." alt="" coords="987,665,1121,691"/>
+<area shape="poly" id="edge13_Node000011_Node000012" title=" " alt="" coords="1546,616,1121,671,1121,665,1545,611"/>
+<area shape="rect" id="Node000014" href="$peers_8hpp.html" title="Functions for finding peer ranks for point to point communication in global domains." alt="" coords="1347,665,1433,691"/>
+<area shape="poly" id="edge16_Node000011_Node000014" title=" " alt="" coords="1556,624,1425,668,1423,663,1554,619"/>
+<area shape="poly" id="edge18_Node000011_Node000015" title=" " alt="" coords="1615,629,1630,664,1625,666,1610,631"/>
+<area shape="rect" id="Node000013" href="$octree__focus__mpi_8hpp.html" title="Traits and functors for the MPI&#45;enabled FocusedOctree." alt="" coords="790,739,955,764"/>
+<area shape="poly" id="edge14_Node000012_Node000013" title=" " alt="" coords="1013,698,903,741,901,736,1011,693"/>
+<area shape="poly" id="edge15_Node000013_Node000006" title=" " alt="" coords="970,763,1341,814,1340,819,969,768"/>
+<area shape="poly" id="edge17_Node000014_Node000006" title=" " alt="" coords="1393,705,1393,812,1387,812,1387,705"/>
+<area shape="poly" id="edge20_Node000015_Node000013" title=" " alt="" coords="1549,690,956,745,956,740,1549,684"/>
+<area shape="poly" id="edge19_Node000015_Node000016" title=" " alt="" coords="1689,692,1856,736,1854,741,1688,697"/>
+<area shape="poly" id="edge22_Node000017_Node000012" title=" " alt="" coords="1173,558,1168,589,1154,619,1139,635,1122,648,1087,668,1084,663,1119,644,1135,631,1149,616,1162,587,1168,557"/>
+<area shape="poly" id="edge31_Node000018_Node000011" title=" " alt="" coords="1520,549,1585,590,1582,594,1517,554"/>
+<area shape="poly" id="edge32_Node000018_Node000012" title=" " alt="" coords="1454,552,1379,586,1290,620,1195,648,1109,668,1108,663,1193,642,1288,615,1377,581,1452,547"/>
+<area shape="poly" id="edge30_Node000018_Node000016" title=" " alt="" coords="1494,557,1499,588,1510,624,1527,659,1553,689,1573,700,1600,710,1673,726,1754,737,1829,743,1828,749,1753,742,1672,731,1599,715,1570,705,1550,693,1523,662,1505,626,1494,589,1488,558"/>
+<area shape="rect" id="Node000019" href="$collisions_8hpp.html" title="Collision detection for halo discovery using octree traversal." alt="" coords="1373,592,1484,617"/>
+<area shape="poly" id="edge24_Node000018_Node000019" title=" " alt="" coords="1472,556,1440,594,1436,590,1468,553"/>
+<area shape="poly" id="edge28_Node000019_Node000006" title=" " alt="" coords="1441,629,1449,659,1449,691,1439,727,1425,762,1399,813,1394,811,1420,759,1434,726,1443,690,1444,659,1436,631"/>
+<area shape="rect" id="Node000020" href="$collisions__gpu_8h.html" title="GPU driver for halo discovery using traversal of an octree." alt="" coords="1196,665,1323,691"/>
+<area shape="poly" id="edge25_Node000019_Node000020" title=" " alt="" coords="1390,625,1288,668,1286,663,1388,620"/>
+<area shape="rect" id="Node000021" href="$halos_8hpp.html" title="Implementation of halo discovery and halo exchange." alt="" coords="495,739,581,764"/>
+<area shape="poly" id="edge29_Node000019_Node000021" title=" " alt="" coords="1360,621,1276,641,1186,668,1160,681,1133,693,1020,714,863,730,581,750,581,745,862,725,1019,708,1132,688,1158,676,1184,663,1274,635,1359,616"/>
+<area shape="poly" id="edge26_Node000020_Node000021" title=" " alt="" coords="1182,693,1177,693,833,728,581,749,580,744,833,723,1176,688,1182,687"/>
+<area shape="poly" id="edge27_Node000021_Node000006" title=" " alt="" coords="594,755,1340,817,1340,822,594,760"/>
+<area shape="rect" id="Node000024" href="$hilbert_8hpp.html" title="3D Hilbert encoding/decoding in 32&#45; and 64&#45;bit" alt="" coords="1413,299,1505,324"/>
+<area shape="poly" id="edge35_Node000023_Node000024" title=" " alt="" coords="1401,258,1447,296,1444,300,1398,262"/>
+<area shape="rect" id="Node000025" href="$sfc_8hpp.html" title="SFC encoding/decoding in 32&#45; and 64&#45;bit." alt="" coords="1425,372,1494,397"/>
+<area shape="poly" id="edge57_Node000023_Node000025" title=" " alt="" coords="1383,263,1391,293,1404,323,1425,349,1446,370,1443,374,1421,353,1400,325,1386,295,1377,265"/>
+<area shape="poly" id="edge36_Node000024_Node000025" title=" " alt="" coords="1462,338,1462,372,1457,372,1457,338"/>
+<area shape="poly" id="edge37_Node000025_Node000005" title=" " alt="" coords="1439,408,1395,442,1339,473,1294,488,1255,497,1187,501,1118,503,1079,509,1033,521,957,551,888,594,840,633,804,667,800,663,836,629,884,590,955,546,1032,516,1078,504,1117,498,1186,496,1255,491,1293,483,1337,468,1392,438,1435,404"/>
+<area shape="poly" id="edge40_Node000025_Node000006" title=" " alt="" coords="1508,388,1592,404,1638,420,1681,443,1724,478,1739,497,1750,517,1761,562,1759,618,1753,666,1743,704,1724,736,1687,766,1657,783,1625,796,1558,814,1494,824,1440,827,1439,821,1493,818,1557,809,1623,791,1655,778,1685,762,1720,733,1739,702,1748,665,1754,617,1756,562,1745,518,1735,500,1720,482,1678,448,1636,425,1591,410,1507,393"/>
+<area shape="poly" id="edge38_Node000025_Node000010" title=" " alt="" coords="1491,402,1559,443,1556,447,1489,407"/>
+<area shape="poly" id="edge41_Node000025_Node000016" title=" " alt="" coords="1508,383,1595,386,1699,395,1793,413,1830,426,1855,443,1870,464,1878,485,1880,504,1878,524,1870,567,1868,590,1870,617,1884,686,1897,738,1892,739,1879,687,1865,618,1863,590,1865,566,1873,524,1875,504,1873,486,1866,467,1851,447,1827,431,1792,418,1698,400,1595,392,1508,389"/>
+<area shape="poly" id="edge39_Node000025_Node000022" title=" " alt="" coords="1412,397,1121,449,1120,443,1411,392"/>
+<area shape="rect" id="Node000026" href="$octree_8hpp.html" title="Compute the internal part of a cornerstone octree." alt="" coords="1401,445,1491,471"/>
+<area shape="poly" id="edge42_Node000025_Node000026" title=" " alt="" coords="1457,412,1451,446,1446,445,1452,411"/>
+<area shape="rect" id="Node000030" href="$sfc__gpu_8h.html" title="SFC encoding/decoding in 32&#45; and 64&#45;bit on the GPU." alt="" coords="1589,739,1673,764"/>
+<area shape="poly" id="edge55_Node000025_Node000030" title=" " alt="" coords="1509,386,1544,392,1582,402,1619,419,1652,443,1703,502,1722,531,1734,560,1741,590,1741,622,1733,655,1718,692,1706,708,1692,722,1661,741,1658,736,1689,717,1702,705,1713,689,1728,654,1736,621,1736,590,1729,561,1717,533,1699,505,1648,447,1617,423,1580,407,1543,397,1508,391"/>
+<area shape="poly" id="edge43_Node000026_Node000005" title=" " alt="" coords="1388,472,1382,473,1303,484,1241,491,1179,500,1103,521,1014,556,930,598,810,668,808,663,927,593,1012,552,1101,516,1178,495,1240,485,1302,479,1382,468,1387,467"/>
+<area shape="poly" id="edge46_Node000026_Node000011" title=" " alt="" coords="1491,474,1525,492,1557,517,1585,555,1600,591,1596,593,1580,558,1553,521,1522,496,1488,478"/>
+<area shape="poly" id="edge47_Node000026_Node000012" title=" " alt="" coords="1393,477,1343,496,1293,521,1258,545,1235,569,1211,593,1177,620,1128,647,1084,668,1081,663,1126,642,1174,615,1207,589,1231,565,1255,541,1290,516,1341,491,1392,472"/>
+<area shape="poly" id="edge51_Node000026_Node000015" title=" " alt="" coords="1504,473,1547,490,1592,514,1631,548,1647,568,1659,591,1663,612,1659,632,1643,666,1638,664,1654,631,1657,612,1654,593,1643,571,1627,551,1589,519,1545,494,1502,477"/>
+<area shape="poly" id="edge50_Node000026_Node000017" title=" " alt="" coords="1389,477,1216,521,1215,516,1388,472"/>
+<area shape="poly" id="edge52_Node000026_Node000018" title=" " alt="" coords="1462,481,1484,517,1479,520,1458,484"/>
+<area shape="rect" id="Node000027" href="$exchange__focus_8hpp.html" title="Request counts for a locally present node structure of a remote domain from a remote rank." alt="" coords="581,519,735,544"/>
+<area shape="poly" id="edge44_Node000026_Node000027" title=" " alt="" coords="1387,468,1338,473,1043,496,749,521,736,523,735,517,748,516,1043,491,1338,468,1387,463"/>
+<area shape="rect" id="Node000028" href="$octree__gpu_8h.html" title="Compute the internal part of a cornerstone octree on the GPU." alt="" coords="1303,519,1410,544"/>
+<area shape="poly" id="edge48_Node000026_Node000028" title=" " alt="" coords="1423,481,1373,521,1370,516,1419,477"/>
+<area shape="rect" id="Node000029" href="$update__mpi_8hpp.html" title="MPI extension for calculating distributed cornerstone octrees." alt="" coords="760,519,887,544"/>
+<area shape="poly" id="edge53_Node000026_Node000029" title=" " alt="" coords="1387,469,887,525,887,520,1386,463"/>
+<area shape="poly" id="edge45_Node000027_Node000013" title=" " alt="" coords="663,557,669,587,679,622,696,658,719,689,739,705,761,718,809,736,808,741,759,723,735,710,715,693,691,660,674,624,664,588,658,558"/>
+<area shape="poly" id="edge49_Node000028_Node000012" title=" " alt="" coords="1338,556,1300,589,1254,620,1183,649,1114,668,1113,663,1181,644,1251,615,1297,584,1334,552"/>
+<area shape="poly" id="edge54_Node000029_Node000005" title=" " alt="" coords="801,555,786,573,775,593,772,612,775,631,787,664,782,666,769,632,767,612,770,591,782,570,797,552"/>
+<area shape="poly" id="edge56_Node000030_Node000006" title=" " alt="" coords="1580,770,1430,814,1428,809,1578,765"/>
+<area shape="rect" id="Node000033" href="$domaindecomp__mpi_8hpp.html" title="Exchange particles between different ranks to satisfy their assignments of the global octree." alt="" coords="469,592,652,617"/>
+<area shape="poly" id="edge60_Node000032_Node000033" title=" " alt="" coords="225,544,494,589,493,595,224,549"/>
+<area shape="rect" id="Node000034" href="$exchange__halos_8hpp.html" title="Halo particle exchange with MPI point&#45;to&#45;point communication." alt="" coords="59,665,214,691"/>
+<area shape="poly" id="edge62_Node000032_Node000034" title=" " alt="" coords="146,558,140,665,135,665,141,558"/>
+<area shape="poly" id="edge61_Node000033_Node000005" title=" " alt="" coords="612,619,755,663,753,668,610,624"/>
+<area shape="poly" id="edge63_Node000034_Node000021" title=" " alt="" coords="215,690,496,740,495,745,214,696"/>
+<area shape="poly" id="edge85_Node000035_Node000023" title=" " alt="" coords="841,171,1327,228,1326,234,841,177"/>
+<area shape="poly" id="edge65_Node000035_Node000031" title=" " alt="" coords="750,188,700,227,697,223,747,184"/>
+<area shape="rect" id="Node000036" href="$cs__util_8hpp.html" title="utility functions for cornerstone octrees" alt="" coords="357,445,449,471"/>
+<area shape="poly" id="edge66_Node000035_Node000036" title=" " alt="" coords="770,192,759,222,740,252,704,289,664,323,579,379,498,421,435,448,433,443,495,416,576,374,661,318,701,285,736,249,754,220,765,190"/>
+<area shape="poly" id="edge67_Node000035_Node000037" title=" " alt="" coords="782,190,821,371,816,372,777,191"/>
+<area shape="poly" id="edge83_Node000037_Node000017" title=" " alt="" coords="854,402,917,434,991,468,1065,495,1132,516,1130,521,1063,500,989,473,914,439,852,406"/>
+<area shape="poly" id="edge68_Node000037_Node000022" title=" " alt="" coords="873,399,1023,443,1021,448,872,404"/>
+<area shape="poly" id="edge82_Node000037_Node000026" title=" " alt="" coords="882,390,1401,449,1400,454,882,396"/>
+<area shape="poly" id="edge81_Node000037_Node000027" title=" " alt="" coords="799,409,673,520,669,516,795,405"/>
+<area shape="poly" id="edge84_Node000037_Node000029" title=" " alt="" coords="824,411,826,518,820,519,818,411"/>
+<area shape="poly" id="edge69_Node000037_Node000036" title=" " alt="" coords="759,399,469,448,450,451,449,446,468,443,758,394"/>
+<area shape="rect" id="Node000038" href="$csarray__gpu_8h.html" title="Generation of local and global octrees in cornerstone format on the GPU." alt="" coords="981,592,1095,617"/>
+<area shape="poly" id="edge70_Node000037_Node000038" title=" " alt="" coords="841,407,896,469,968,538,1026,590,1023,594,965,542,892,473,837,410"/>
+<area shape="rect" id="Node000039" href="$domaindecomp_8hpp.html" title="Functions to assign a global cornerstone octree to different ranks." alt="" coords="405,519,556,544"/>
+<area shape="poly" id="edge72_Node000037_Node000039" title=" " alt="" coords="792,407,730,444,676,473,600,501,530,521,528,516,598,496,674,468,727,440,789,402"/>
+<area shape="poly" id="edge71_Node000038_Node000012" title=" " alt="" coords="1046,630,1054,665,1049,666,1041,631"/>
+<area shape="poly" id="edge80_Node000039_Node000014" title=" " alt="" coords="570,542,912,589,942,602,971,615,1071,637,1152,645,1233,650,1336,663,1347,665,1346,670,1335,668,1232,655,1151,650,1071,642,969,620,940,607,911,595,569,547"/>
+<area shape="rect" id="Node000040" href="$layout_8hpp.html" title="Utility functions for determining the layout of particle buffers on a given rank." alt="" coords="303,592,394,617"/>
+<area shape="poly" id="edge73_Node000039_Node000040" title=" " alt="" coords="449,553,372,594,369,589,446,548"/>
+<area shape="poly" id="edge74_Node000040_Node000005" title=" " alt="" coords="408,613,728,664,727,669,407,618"/>
+<area shape="poly" id="edge75_Node000040_Node000006" title=" " alt="" coords="350,631,353,660,364,689,389,720,415,738,445,749,484,761,560,778,662,792,910,810,1159,818,1340,821,1340,826,1159,823,910,815,662,797,559,784,483,767,443,754,412,742,386,723,360,692,348,662,345,631"/>
+<area shape="poly" id="edge79_Node000040_Node000013" title=" " alt="" coords="367,627,397,660,416,676,437,688,464,699,502,708,595,723,790,742,790,748,594,729,501,713,463,704,434,693,413,680,393,664,363,631"/>
+<area shape="poly" id="edge78_Node000040_Node000021" title=" " alt="" coords="356,630,367,660,387,689,411,708,440,722,496,740,494,745,437,727,408,712,383,693,362,663,351,632"/>
+<area shape="rect" id="Node000041" href="$exchange__keys_8hpp.html" title="Send/receive SFC key ranges to let peer ranks know which particles to send as halos." alt="" coords="5,739,156,764"/>
+<area shape="poly" id="edge76_Node000040_Node000041" title=" " alt="" coords="290,612,223,618,151,628,88,644,65,655,50,667,44,684,48,703,59,721,71,737,67,740,55,724,43,705,38,684,45,664,62,650,86,639,149,623,222,612,289,606"/>
+<area shape="poly" id="edge77_Node000041_Node000006" title=" " alt="" coords="170,757,233,761,887,797,1340,819,1340,824,887,803,233,767,169,762"/>
+<area shape="poly" id="edge90_Node000042_Node000006" title=" " alt="" coords="1292,387,1455,404,1553,420,1651,443,1708,456,1760,465,1850,481,1890,494,1928,515,1964,546,2000,590,2027,636,2039,680,2038,702,2033,723,2022,744,2005,766,1975,781,1919,793,1760,810,1581,820,1440,825,1440,820,1581,815,1759,805,1919,787,1973,776,2002,762,2017,742,2028,721,2033,701,2034,681,2022,638,1996,594,1960,550,1925,519,1888,499,1848,486,1759,470,1707,461,1649,448,1552,426,1455,409,1292,392"/>
+<area shape="poly" id="edge93_Node000042_Node000026" title=" " alt="" coords="1281,399,1412,443,1411,448,1279,404"/>
+<area shape="poly" id="edge91_Node000042_Node000027" title=" " alt="" coords="1216,410,1180,443,1158,460,1133,473,736,523,736,518,1132,468,1155,455,1177,439,1212,406"/>
+<area shape="poly" id="edge89_Node000042_Node000032" title=" " alt="" coords="1174,391,835,409,649,425,572,436,515,448,489,460,463,473,403,491,341,505,228,523,228,518,340,499,401,485,461,468,487,455,513,443,571,431,648,420,834,403,1173,385"/>
+<area shape="rect" id="Node000043" href="$ifile__io__ascii_8cpp.html" title="ASCII file I/O." alt="" coords="1196,445,1325,471"/>
+<area shape="poly" id="edge92_Node000042_Node000043" title=" " alt="" coords="1245,409,1259,444,1254,446,1240,411"/>
+<area shape="poly" id="edge99_Node000044_Node000012" title=" " alt="" coords="512,476,440,495,412,507,395,520,390,531,395,542,414,557,444,567,521,579,603,583,665,589,1005,663,1004,668,664,595,602,589,521,584,443,572,412,561,391,546,385,531,391,517,409,502,438,490,511,471"/>
+<area shape="poly" id="edge98_Node000044_Node000021" title=" " alt="" coords="516,476,450,494,384,521,330,549,311,566,294,593,288,609,287,623,296,650,317,673,348,692,385,709,424,722,496,740,495,745,422,727,383,714,345,697,314,677,291,652,282,624,283,608,289,591,307,562,327,544,382,516,449,489,515,471"/>
+<area shape="poly" id="edge97_Node000044_Node000027" title=" " alt="" coords="616,479,650,517,646,520,612,483"/>
+<area shape="poly" id="edge95_Node000044_Node000032" title=" " alt="" coords="512,475,217,521,216,516,511,470"/>
+<area shape="poly" id="edge96_Node000044_Node000039" title=" " alt="" coords="565,480,501,521,498,516,562,476"/>
+<area shape="poly" id="edge101_Node000045_Node000012" title=" " alt="" coords="969,338,973,400,980,436,992,470,1005,491,1020,506,1052,528,1084,551,1098,568,1110,591,1112,614,1103,635,1088,653,1072,667,1068,663,1084,649,1098,632,1106,613,1105,593,1093,571,1080,555,1049,533,1017,510,1001,494,988,472,975,437,967,401,964,338"/>
+<area shape="poly" id="edge103_Node000046_Node000013" title=" " alt="" coords="399,261,373,283,347,312,327,346,321,364,319,383,319,459,322,491,330,516,342,536,359,553,403,583,459,615,549,660,643,695,732,720,807,736,806,741,731,725,641,700,547,665,457,620,400,588,355,557,338,540,325,518,317,492,314,459,314,383,316,363,322,344,343,309,369,280,396,257"/>
+</map>
