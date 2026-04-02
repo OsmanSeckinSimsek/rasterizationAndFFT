@@ -127,8 +127,11 @@ int main(int argc, char** argv)
     int               meshSize           = parser.get("--gridSize", 0);
     size_t            numShells          = parser.get("--numShells", 0);
     std::string       interpolationMode  = parser.get<std::string>("--interpolation", "nearest"); // "nearest" or "sph"
+    std::string       fieldMode          = parser.get<std::string>("--field", "velocity");         // "velocity" or "density"
     std::string       outputFile         = parser.get<std::string>("--output", "power_spectrum.txt");
     bool              usePencils         = parser.exists("--pencils");
+    bool              useCudaAwareMpi    = parser.exists("--cuda-aware-mpi");
+    bool              useCudaAwareFullPack = parser.exists("--cuda-aware-full-pack");
 
     Timer timer(std::cout);
 
@@ -181,6 +184,15 @@ int main(int argc, char** argv)
     // init mesh, sim box -0.5 to 0.5 by default
     Mesh<MeshType> mesh(rank, numRanks, gridDim, numShells);
     mesh.usePencils_ = usePencils;
+    mesh.useCudaAwareMpi_ = useCudaAwareMpi;
+    mesh.useCudaAwareGpuPack_ = useCudaAwareFullPack;
+
+    if (rank == 0 && mesh.useCudaAwareMpi_)
+    {
+        std::cout << "CUDA-aware MPI exchange path requested for CUDA rasterization methods." << std::endl;
+        if (mesh.useCudaAwareGpuPack_)
+            std::cout << "Full GPU rank-packing enabled (experimental)." << std::endl;
+    }
 
     // mesh.assign_velocities_to_mesh(x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(), simDim, gridDim);
 
@@ -206,8 +218,41 @@ int main(int argc, char** argv)
 
     timer.elapsed("Sync");
 
-    // Choose interpolation method
-    if (interpolationMode == "sph")
+    if (fieldMode != "velocity" && fieldMode != "density")
+    {
+        if (rank == 0)
+            std::cerr << "Unknown --field option: " << fieldMode << " (expected 'velocity' or 'density')" << std::endl;
+        return exitFailure();
+    }
+
+    // Choose particle-to-grid field
+    if (fieldMode == "density")
+    {
+        if (rank == 0) std::cout << "Using density rasterization" << std::endl;
+        if (backend == RasterBackend::Cuda)
+        {
+#ifdef USE_CUDA
+            rasterize_particles_to_density_cuda(mesh, keys, x, y, z, powerDim);
+#else
+            mesh.rasterize_particles_to_density(keys, x, y, z, powerDim);
+#endif
+        }
+        else
+        {
+            if (backend == RasterBackend::Nvshmem && rank == 0)
+                std::cout << "NVSHMEM density rasterizer is not implemented, using CPU/MPI density path." << std::endl;
+            mesh.rasterize_particles_to_density(keys, x, y, z, powerDim);
+        }
+
+        // Reuse existing spectrum pipeline (velX + velY + velZ) by storing density as scalar component.
+        mesh.velX_ = mesh.density_;
+        std::fill(mesh.velY_.begin(), mesh.velY_.end(), 0.0);
+        std::fill(mesh.velZ_.begin(), mesh.velZ_.end(), 0.0);
+#ifdef USE_CUDA
+        mesh.gpuDataValid_ = false;
+#endif
+    }
+    else if (interpolationMode == "sph")
     {
         if (rank == 0) std::cout << "Using SPH interpolation" << std::endl;
         if (backend == RasterBackend::Cuda)
@@ -311,7 +356,10 @@ void printSpectrumHelp(char* name, int rank)
         printf("\t--backend \t\t Rasterization backend: 'cpu', 'cuda' (or 'gpudirect'), 'nvshmem',"
                " or omit for automatic selection (prefers nvshmem, then cuda, then cpu).\n\n");
         printf("\t--interpolation \t\t Interpolation method: 'nearest' (default), 'sph', or 'cell_avg'.\n\n");
+        printf("\t--field \t\t Particle-to-grid field: 'velocity' (default) or 'density'.\n\n");
         printf("\t--output \t\t Output filename for the power spectrum (default: power_spectrum.txt).\n\n");
         printf("\t--pencils \t\t Use heFFTe pencil decomposition instead of the default slab decomposition.\n\n");
+        printf("\t--cuda-aware-mpi \t Enable CUDA-aware MPI Alltoallv exchange path in CUDA nearest/cell_avg/SPH rasterizers.\n\n");
+        printf("\t--cuda-aware-full-pack \t Enable full GPU rank-pack send path for CUDA-aware mode (experimental).\n\n");
     }
 }

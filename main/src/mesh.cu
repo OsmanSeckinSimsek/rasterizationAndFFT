@@ -59,6 +59,13 @@ inline int boxSize1DHost(int dim, int nBoxes, int boxId)
     return (boxId < rem) ? (base + 1) : base;
 }
 
+inline int boxLow1DHost(int dim, int nBoxes, int boxId)
+{
+    int base = dim / nBoxes;
+    int rem  = dim % nBoxes;
+    return boxId * base + std::min(boxId, rem);
+}
+
 inline std::array<int, 3> rankInboxSizeHost(int rank, int gridDim, const int* procGrid)
 {
     int xBox = rank % procGrid[0];
@@ -67,6 +74,16 @@ inline std::array<int, 3> rankInboxSizeHost(int rank, int gridDim, const int* pr
     return {boxSize1DHost(gridDim, procGrid[0], xBox),
             boxSize1DHost(gridDim, procGrid[1], yBox),
             boxSize1DHost(gridDim, procGrid[2], zBox)};
+}
+
+inline std::array<int, 3> rankInboxLowHost(int rank, int gridDim, const int* procGrid)
+{
+    int xBox = rank % procGrid[0];
+    int yBox = (rank / procGrid[0]) % procGrid[1];
+    int zBox = rank / (procGrid[0] * procGrid[1]);
+    return {boxLow1DHost(gridDim, procGrid[0], xBox),
+            boxLow1DHost(gridDim, procGrid[1], yBox),
+            boxLow1DHost(gridDim, procGrid[2], zBox)};
 }
 
 // Kernel to process particles and classify them as local or remote
@@ -140,6 +157,95 @@ __global__ void classifyParticlesKernel(KeyType* keys, T* x, T* y, T* z, T* vx, 
         remoteVy[pos]        = vy[idx];
         remoteVz[pos]        = vz[idx];
     }
+}
+
+template<typename T>
+__global__ void classifyParticlesDensityKernel(KeyType* keys, int numParticles, int gridDim, int* procGrid, int rank,
+                                               uint64_t* localIndices, int* localCount, int* remoteRanks,
+                                               uint64_t* remoteIndices, int* remoteCount)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParticles) return;
+
+    auto     coords = cstone::decodeHilbert(keys[idx]);
+    unsigned coordX = util::get<0>(coords);
+    unsigned coordY = util::get<1>(coords);
+    unsigned coordZ = util::get<2>(coords);
+
+    unsigned divisor = 1 + (1 << 21) / gridDim;
+    int      indexi  = coordX / divisor;
+    int      indexj  = coordY / divisor;
+    int      indexk  = coordZ / divisor;
+
+    int xBox, yBox, zBox;
+    int xLocal, yLocal, zLocal;
+    int xSize, ySize, zSize;
+    decomposeGlobalIndex1D(indexi, gridDim, procGrid[0], xBox, xLocal, xSize);
+    decomposeGlobalIndex1D(indexj, gridDim, procGrid[1], yBox, yLocal, ySize);
+    decomposeGlobalIndex1D(indexk, gridDim, procGrid[2], zBox, zLocal, zSize);
+    int targetRank = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
+
+    uint64_t inboxIndex = static_cast<uint64_t>(xLocal) +
+                          static_cast<uint64_t>(yLocal) * xSize +
+                          static_cast<uint64_t>(zLocal) * xSize * ySize;
+
+    if (targetRank == rank)
+    {
+        int pos           = atomicAdd(localCount, 1);
+        localIndices[pos] = inboxIndex;
+    }
+    else
+    {
+        int pos            = atomicAdd(remoteCount, 1);
+        remoteRanks[pos]   = targetRank;
+        remoteIndices[pos] = inboxIndex;
+    }
+}
+
+__global__ void countRemoteByRankKernel(const int* remoteRanks, int n, int* rankCounts)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    atomicAdd(&rankCounts[remoteRanks[idx]], 1);
+}
+
+template<typename T>
+__global__ void packNearestByRankKernel(const int* remoteRanks, const uint64_t* remoteIndices,
+                                        const T* remoteDistances, const T* remoteVx, const T* remoteVy,
+                                        const T* remoteVz, int n, const int* sendDisp, int* rankWriteOffset,
+                                        uint64_t* sendIndex, T* sendDistance, T* sendVx, T* sendVy, T* sendVz)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    int r   = remoteRanks[idx];
+    int pos = atomicAdd(&rankWriteOffset[r], 1);
+    int out = sendDisp[r] + pos;
+
+    sendIndex[out]    = remoteIndices[idx];
+    sendDistance[out] = remoteDistances[idx];
+    sendVx[out]       = remoteVx[idx];
+    sendVy[out]       = remoteVy[idx];
+    sendVz[out]       = remoteVz[idx];
+}
+
+template<typename T>
+__global__ void packCellAvgByRankKernel(const int* remoteRanks, const uint64_t* remoteIndices,
+                                        const T* remoteVx, const T* remoteVy, const T* remoteVz,
+                                        int n, const int* sendDisp, int* rankWriteOffset,
+                                        uint64_t* sendIndex, T* sendVx, T* sendVy, T* sendVz)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    int r   = remoteRanks[idx];
+    int pos = atomicAdd(&rankWriteOffset[r], 1);
+    int out = sendDisp[r] + pos;
+
+    sendIndex[out] = remoteIndices[idx];
+    sendVx[out]    = remoteVx[idx];
+    sendVy[out]    = remoteVy[idx];
+    sendVz[out]    = remoteVz[idx];
 }
 
 // Pass 1: atomically record the minimum distance per cell — no velocity writes.
@@ -237,29 +343,22 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     int      numParticles = keys.size();
     uint64_t inboxSize    = static_cast<uint64_t>(mesh.inbox_.size[0]) * mesh.inbox_.size[1] * mesh.inbox_.size[2];
 
-    // ========== Device Memory Allocation ==========
-    // Input particle data
+    std::fill(mesh.send_count.begin(), mesh.send_count.end(), 0);
+    std::fill(mesh.send_disp.begin(), mesh.send_disp.end(), 0);
+    std::fill(mesh.recv_disp.begin(), mesh.recv_disp.end(), 0);
+
     KeyType* d_keys;
     T *      d_x, *d_y, *d_z, *d_vx, *d_vy, *d_vz;
-
-    // Mesh configuration
     int *d_inboxLow, *d_inboxHigh, *d_inboxSize, *d_procGrid;
-
-    // Local assignment buffers (max size = numParticles)
     uint64_t* d_localIndices;
     T *       d_localDistances, *d_localVx, *d_localVy, *d_localVz;
     int*      d_localCount;
-
-    // Remote assignment buffers (max size = numParticles)
     int*      d_remoteRanks;
     uint64_t* d_remoteIndices;
     T *       d_remoteDistances, *d_remoteVx, *d_remoteVy, *d_remoteVz;
     int*      d_remoteCount;
+    T *       d_meshVelX, *d_meshVelY, *d_meshVelZ, *d_meshDistance;
 
-    // Mesh data
-    T *d_meshVelX, *d_meshVelY, *d_meshVelZ, *d_meshDistance;
-
-    // Allocate device memory
     checkCudaError(cudaMalloc(&d_keys, numParticles * sizeof(KeyType)), "Allocating d_keys");
     checkCudaError(cudaMalloc(&d_x, numParticles * sizeof(T)), "Allocating d_x");
     checkCudaError(cudaMalloc(&d_y, numParticles * sizeof(T)), "Allocating d_y");
@@ -267,7 +366,6 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     checkCudaError(cudaMalloc(&d_vx, numParticles * sizeof(T)), "Allocating d_vx");
     checkCudaError(cudaMalloc(&d_vy, numParticles * sizeof(T)), "Allocating d_vy");
     checkCudaError(cudaMalloc(&d_vz, numParticles * sizeof(T)), "Allocating d_vz");
-
     checkCudaError(cudaMalloc(&d_inboxLow, 3 * sizeof(int)), "Allocating d_inboxLow");
     checkCudaError(cudaMalloc(&d_inboxHigh, 3 * sizeof(int)), "Allocating d_inboxHigh");
     checkCudaError(cudaMalloc(&d_inboxSize, 3 * sizeof(int)), "Allocating d_inboxSize");
@@ -293,53 +391,31 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     checkCudaError(cudaMalloc(&d_meshVelZ, inboxSize * sizeof(T)), "Allocating d_meshVelZ");
     checkCudaError(cudaMalloc(&d_meshDistance, inboxSize * sizeof(T)), "Allocating d_meshDistance");
 
-    // ========== Copy Data to Device ==========
-    checkCudaError(cudaMemcpy(d_keys, keys.data(), numParticles * sizeof(KeyType), cudaMemcpyHostToDevice),
-                    "Copying keys to device");
-    checkCudaError(cudaMemcpy(d_x, x.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying x to device");
-    checkCudaError(cudaMemcpy(d_y, y.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying y to device");
-    checkCudaError(cudaMemcpy(d_z, z.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying z to device");
-    checkCudaError(cudaMemcpy(d_vx, vx.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying vx to device");
-    checkCudaError(cudaMemcpy(d_vy, vy.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying vy to device");
-    checkCudaError(cudaMemcpy(d_vz, vz.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying vz to device");
+    checkCudaError(cudaMemcpy(d_keys, keys.data(), numParticles * sizeof(KeyType), cudaMemcpyHostToDevice), "Copying keys to device");
+    checkCudaError(cudaMemcpy(d_x, x.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying x to device");
+    checkCudaError(cudaMemcpy(d_y, y.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying y to device");
+    checkCudaError(cudaMemcpy(d_z, z.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying z to device");
+    checkCudaError(cudaMemcpy(d_vx, vx.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vx to device");
+    checkCudaError(cudaMemcpy(d_vy, vy.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vy to device");
+    checkCudaError(cudaMemcpy(d_vz, vz.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vz to device");
 
-    // Copy mesh configuration
     std::array<int, 3> inboxLow     = {mesh.inbox_.low[0], mesh.inbox_.low[1], mesh.inbox_.low[2]};
     std::array<int, 3> inboxHigh    = {mesh.inbox_.high[0], mesh.inbox_.high[1], mesh.inbox_.high[2]};
     std::array<int, 3> inboxSizeArr = {mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]};
-    checkCudaError(cudaMemcpy(d_inboxLow, inboxLow.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying inbox low to device");
-    checkCudaError(cudaMemcpy(d_inboxHigh, inboxHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying inbox high to device");
-    checkCudaError(cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying inbox size to device");
-    checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying proc_grid to device");
+    checkCudaError(cudaMemcpy(d_inboxLow, inboxLow.data(), 3 * sizeof(int), cudaMemcpyHostToDevice), "Copying inbox low to device");
+    checkCudaError(cudaMemcpy(d_inboxHigh, inboxHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice), "Copying inbox high to device");
+    checkCudaError(cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice), "Copying inbox size to device");
+    checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice), "Copying proc_grid to device");
 
-    // Initialize counters
     int zeroCount = 0;
-    checkCudaError(cudaMemcpy(d_localCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
-                    "Initializing local count");
-    checkCudaError(cudaMemcpy(d_remoteCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
-                    "Initializing remote count");
+    checkCudaError(cudaMemcpy(d_localCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice), "Initializing local count");
+    checkCudaError(cudaMemcpy(d_remoteCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice), "Initializing remote count");
 
-    // Copy mesh data
-    checkCudaError(cudaMemcpy(d_meshVelX, mesh.velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying mesh velX to device");
-    checkCudaError(cudaMemcpy(d_meshVelY, mesh.velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying mesh velY to device");
-    checkCudaError(cudaMemcpy(d_meshVelZ, mesh.velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying mesh velZ to device");
-    checkCudaError(cudaMemcpy(d_meshDistance, mesh.distance_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice),
-                    "Copying mesh distance to device");
+    checkCudaError(cudaMemcpy(d_meshVelX, mesh.velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice), "Copying mesh velX to device");
+    checkCudaError(cudaMemcpy(d_meshVelY, mesh.velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice), "Copying mesh velY to device");
+    checkCudaError(cudaMemcpy(d_meshVelZ, mesh.velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice), "Copying mesh velZ to device");
+    checkCudaError(cudaMemcpy(d_meshDistance, mesh.distance_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice), "Copying mesh distance to device");
 
-    // ========== Launch Classification Kernel ==========
     int threadsPerBlock = 256;
     int blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
 
@@ -348,72 +424,67 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         d_inboxSize, d_procGrid, mesh.rank_, d_localIndices, d_localDistances, d_localVx, d_localVy, d_localVz,
         d_localCount, d_remoteRanks, d_remoteIndices, d_remoteDistances, d_remoteVx, d_remoteVy, d_remoteVz,
         d_remoteCount);
-
     checkCudaError(cudaDeviceSynchronize(), "Classification kernel execution");
 
-    // ========== Get Counts from Device ==========
-    int h_localCount, h_remoteCount;
-    checkCudaError(cudaMemcpy(&h_localCount, d_localCount, sizeof(int), cudaMemcpyDeviceToHost),
-                    "Copying local count to host");
-    checkCudaError(cudaMemcpy(&h_remoteCount, d_remoteCount, sizeof(int), cudaMemcpyDeviceToHost),
-                    "Copying remote count to host");
+    int h_localCount = 0, h_remoteCount = 0;
+    checkCudaError(cudaMemcpy(&h_localCount, d_localCount, sizeof(int), cudaMemcpyDeviceToHost), "Copying local count to host");
+    checkCudaError(cudaMemcpy(&h_remoteCount, d_remoteCount, sizeof(int), cudaMemcpyDeviceToHost), "Copying remote count to host");
 
-    std::cout << "rank = " << mesh.rank_ << " local count = " << h_localCount << " remote count = " << h_remoteCount
-                << std::endl;
-
-    // ========== Pass 1a: Settle minimum distances for local particles ==========
     if (h_localCount > 0)
     {
         int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
-        updateMeshDistanceKernel<T><<<localBlocks, threadsPerBlock>>>(
-            d_localIndices, d_localDistances, h_localCount, d_meshDistance);
+        updateMeshDistanceKernel<T><<<localBlocks, threadsPerBlock>>>(d_localIndices, d_localDistances, h_localCount, d_meshDistance);
         checkCudaError(cudaDeviceSynchronize(), "Local distance CAS kernel");
     }
 
-    // ========== Process Remote Assignments ==========
-    std::vector<int>      h_remoteRanks(h_remoteCount);
-    std::vector<uint64_t> h_remoteIndices(h_remoteCount);
-    std::vector<T>        h_remoteDistances(h_remoteCount);
-    std::vector<T>        h_remoteVx(h_remoteCount);
-    std::vector<T>        h_remoteVy(h_remoteCount);
-    std::vector<T>        h_remoteVz(h_remoteCount);
+    uint64_t* d_sendIndexNN = nullptr;
+    T *       d_sendDistanceNN = nullptr, *d_sendVxNN = nullptr, *d_sendVyNN = nullptr, *d_sendVzNN = nullptr;
 
-    if (h_remoteCount > 0)
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
     {
-        checkCudaError(
-            cudaMemcpy(h_remoteRanks.data(), d_remoteRanks, h_remoteCount * sizeof(int), cudaMemcpyDeviceToHost),
-            "Copying remote ranks to host");
-        checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices, h_remoteCount * sizeof(uint64_t),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote indices to host");
-        checkCudaError(cudaMemcpy(h_remoteDistances.data(), d_remoteDistances, h_remoteCount * sizeof(T),
-                                    cudaMemcpyDeviceToHost),
-                        "Copying remote distances to host");
-        checkCudaError(cudaMemcpy(h_remoteVx.data(), d_remoteVx, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost),
-                        "Copying remote vx to host");
-        checkCudaError(cudaMemcpy(h_remoteVy.data(), d_remoteVy, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost),
-                        "Copying remote vy to host");
-        checkCudaError(cudaMemcpy(h_remoteVz.data(), d_remoteVz, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost),
-                        "Copying remote vz to host");
+        int* d_sendCount = nullptr;
+        checkCudaError(cudaMalloc(&d_sendCount, mesh.numRanks_ * sizeof(int)), "Allocating d_sendCount NN");
+        checkCudaError(cudaMemset(d_sendCount, 0, mesh.numRanks_ * sizeof(int)), "Zeroing d_sendCount NN");
+
+        if (h_remoteCount > 0)
+        {
+            int rb = (h_remoteCount + threadsPerBlock - 1) / threadsPerBlock;
+            countRemoteByRankKernel<<<rb, threadsPerBlock>>>(d_remoteRanks, h_remoteCount, d_sendCount);
+            checkCudaError(cudaDeviceSynchronize(), "countRemoteByRankKernel NN");
+        }
+        checkCudaError(cudaMemcpy(mesh.send_count.data(), d_sendCount, mesh.numRanks_ * sizeof(int), cudaMemcpyDeviceToHost),
+                       "Copying send_count NN to host");
+        cudaFree(d_sendCount);
+    }
+    else
+    {
+        std::vector<int>      h_remoteRanks(h_remoteCount);
+        std::vector<uint64_t> h_remoteIndices(h_remoteCount);
+        std::vector<T>        h_remoteDistances(h_remoteCount);
+        std::vector<T>        h_remoteVx(h_remoteCount), h_remoteVy(h_remoteCount), h_remoteVz(h_remoteCount);
+
+        if (h_remoteCount > 0)
+        {
+            checkCudaError(cudaMemcpy(h_remoteRanks.data(), d_remoteRanks, h_remoteCount * sizeof(int), cudaMemcpyDeviceToHost), "Copying remote ranks to host");
+            checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices, h_remoteCount * sizeof(uint64_t), cudaMemcpyDeviceToHost), "Copying remote indices to host");
+            checkCudaError(cudaMemcpy(h_remoteDistances.data(), d_remoteDistances, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost), "Copying remote distances to host");
+            checkCudaError(cudaMemcpy(h_remoteVx.data(), d_remoteVx, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost), "Copying remote vx to host");
+            checkCudaError(cudaMemcpy(h_remoteVy.data(), d_remoteVy, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost), "Copying remote vy to host");
+            checkCudaError(cudaMemcpy(h_remoteVz.data(), d_remoteVz, h_remoteCount * sizeof(T), cudaMemcpyDeviceToHost), "Copying remote vz to host");
+        }
+
+        for (int i = 0; i < h_remoteCount; i++)
+        {
+            int targetRank = h_remoteRanks[i];
+            mesh.send_count[targetRank]++;
+            mesh.vdataSender[targetRank].send_index.push_back(h_remoteIndices[i]);
+            mesh.vdataSender[targetRank].send_distance.push_back(h_remoteDistances[i]);
+            mesh.vdataSender[targetRank].send_vx.push_back(h_remoteVx[i]);
+            mesh.vdataSender[targetRank].send_vy.push_back(h_remoteVy[i]);
+            mesh.vdataSender[targetRank].send_vz.push_back(h_remoteVz[i]);
+        }
     }
 
-    // Organize remote data by rank
-    for (int i = 0; i < h_remoteCount; i++)
-    {
-        int targetRank = h_remoteRanks[i];
-        mesh.send_count[targetRank]++;
-        mesh.vdataSender[targetRank].send_index.push_back(h_remoteIndices[i]);
-        mesh.vdataSender[targetRank].send_distance.push_back(h_remoteDistances[i]);
-        mesh.vdataSender[targetRank].send_vx.push_back(h_remoteVx[i]);
-        mesh.vdataSender[targetRank].send_vy.push_back(h_remoteVy[i]);
-        mesh.vdataSender[targetRank].send_vz.push_back(h_remoteVz[i]);
-    }
-
-    // std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
-    // for (int i = 0; i < mesh.numRanks_; i++)
-    //     std::cout << "rank = " << mesh.rank_ << " send_count = " << mesh.send_count[i] << std::endl;
-
-    // ========== MPI Communication ==========
     MPI_Alltoall(mesh.send_count.data(), 1, MpiType<int>{}, mesh.recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
 
     for (int i = 0; i < mesh.numRanks_; i++)
@@ -422,86 +493,133 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         mesh.recv_disp[i + 1] = mesh.recv_disp[i] + mesh.recv_count[i];
     }
 
-    // Prepare send buffers
-    mesh.send_index.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_distance.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_vx.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_vy.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_vz.resize(mesh.send_disp[mesh.numRanks_]);
-    std::cout << "rank = " << mesh.rank_ << " buffers allocated" << std::endl;
-
-    for (int i = 0; i < mesh.numRanks_; i++)
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
     {
-        for (int j = mesh.send_disp[i]; j < mesh.send_disp[i + 1]; j++)
+        int sendTotal = mesh.send_disp[mesh.numRanks_];
+        if (sendTotal > 0)
         {
-            mesh.send_index[j]    = mesh.vdataSender[i].send_index[j - mesh.send_disp[i]];
-            mesh.send_distance[j] = mesh.vdataSender[i].send_distance[j - mesh.send_disp[i]];
-            mesh.send_vx[j]       = mesh.vdataSender[i].send_vx[j - mesh.send_disp[i]];
-            mesh.send_vy[j]       = mesh.vdataSender[i].send_vy[j - mesh.send_disp[i]];
-            mesh.send_vz[j]       = mesh.vdataSender[i].send_vz[j - mesh.send_disp[i]];
+            checkCudaError(cudaMalloc(&d_sendIndexNN, sendTotal * sizeof(uint64_t)), "Allocating d_sendIndexNN");
+            checkCudaError(cudaMalloc(&d_sendDistanceNN, sendTotal * sizeof(T)), "Allocating d_sendDistanceNN");
+            checkCudaError(cudaMalloc(&d_sendVxNN, sendTotal * sizeof(T)), "Allocating d_sendVxNN");
+            checkCudaError(cudaMalloc(&d_sendVyNN, sendTotal * sizeof(T)), "Allocating d_sendVyNN");
+            checkCudaError(cudaMalloc(&d_sendVzNN, sendTotal * sizeof(T)), "Allocating d_sendVzNN");
+
+            int* d_sendDisp = nullptr;
+            int* d_writeOff = nullptr;
+            checkCudaError(cudaMalloc(&d_sendDisp, mesh.numRanks_ * sizeof(int)), "Allocating d_sendDisp NN");
+            checkCudaError(cudaMalloc(&d_writeOff, mesh.numRanks_ * sizeof(int)), "Allocating d_writeOff NN");
+            checkCudaError(cudaMemcpy(d_sendDisp, mesh.send_disp.data(), mesh.numRanks_ * sizeof(int), cudaMemcpyHostToDevice),
+                           "Copying send_disp NN to device");
+            checkCudaError(cudaMemset(d_writeOff, 0, mesh.numRanks_ * sizeof(int)), "Zeroing d_writeOff NN");
+
+            int rb = (h_remoteCount + threadsPerBlock - 1) / threadsPerBlock;
+            if (h_remoteCount > 0)
+            {
+                packNearestByRankKernel<T><<<rb, threadsPerBlock>>>(
+                    d_remoteRanks, d_remoteIndices, d_remoteDistances, d_remoteVx, d_remoteVy, d_remoteVz,
+                    h_remoteCount, d_sendDisp, d_writeOff,
+                    d_sendIndexNN, d_sendDistanceNN, d_sendVxNN, d_sendVyNN, d_sendVzNN);
+                checkCudaError(cudaDeviceSynchronize(), "packNearestByRankKernel");
+            }
+            cudaFree(d_sendDisp);
+            cudaFree(d_writeOff);
         }
     }
-    std::cout << "rank = " << mesh.rank_ << " buffers transformed" << std::endl;
-
-    // Prepare receive buffers
-    mesh.recv_index.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_distance.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_vx.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_vy.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_vz.resize(mesh.recv_disp[mesh.numRanks_]);
-
-    MPI_Alltoallv(mesh.send_index.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{}, mesh.recv_index.data(),
-                    mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_distance.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_distance.data(),
-                    mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_vx.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_vx.data(),
-                    mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_vy.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_vy.data(),
-                    mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_vz.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_vz.data(),
-                    mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    std::cout << "rank = " << mesh.rank_ << " alltoallv done!" << std::endl;
-
-    // ========== Update Mesh with Received Data on GPU ==========
-    if (mesh.recv_disp[mesh.numRanks_] > 0)
+    else
     {
-        // Allocate device memory for received data
-        uint64_t* d_recvIndices;
-        T *       d_recvDistances, *d_recvVx, *d_recvVy, *d_recvVz;
+        mesh.send_index.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_distance.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_vx.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_vy.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_vz.resize(mesh.send_disp[mesh.numRanks_]);
 
-        checkCudaError(cudaMalloc(&d_recvIndices, mesh.recv_disp[mesh.numRanks_] * sizeof(uint64_t)),
-                        "Allocating d_recvIndices");
-        checkCudaError(cudaMalloc(&d_recvDistances, mesh.recv_disp[mesh.numRanks_] * sizeof(T)),
-                        "Allocating d_recvDistances");
-        checkCudaError(cudaMalloc(&d_recvVx, mesh.recv_disp[mesh.numRanks_] * sizeof(T)), "Allocating d_recvVx");
-        checkCudaError(cudaMalloc(&d_recvVy, mesh.recv_disp[mesh.numRanks_] * sizeof(T)), "Allocating d_recvVy");
-        checkCudaError(cudaMalloc(&d_recvVz, mesh.recv_disp[mesh.numRanks_] * sizeof(T)), "Allocating d_recvVz");
+        for (int i = 0; i < mesh.numRanks_; i++)
+        {
+            for (int j = mesh.send_disp[i]; j < mesh.send_disp[i + 1]; j++)
+            {
+                int local = j - mesh.send_disp[i];
+                mesh.send_index[j]    = mesh.vdataSender[i].send_index[local];
+                mesh.send_distance[j] = mesh.vdataSender[i].send_distance[local];
+                mesh.send_vx[j]       = mesh.vdataSender[i].send_vx[local];
+                mesh.send_vy[j]       = mesh.vdataSender[i].send_vy[local];
+                mesh.send_vz[j]       = mesh.vdataSender[i].send_vz[local];
+            }
+        }
+    }
 
-        // Copy received data to device
-        checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(uint64_t),
-                                    cudaMemcpyHostToDevice),
-                        "Copying recv indices to device");
-        checkCudaError(cudaMemcpy(d_recvDistances, mesh.recv_distance.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(T),
-                                    cudaMemcpyHostToDevice),
-                        "Copying recv distances to device");
-        checkCudaError(
-            cudaMemcpy(d_recvVx, mesh.recv_vx.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
-            "Copying recv vx to device");
-        checkCudaError(
-            cudaMemcpy(d_recvVy, mesh.recv_vy.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
-            "Copying recv vy to device");
-        checkCudaError(
-            cudaMemcpy(d_recvVz, mesh.recv_vz.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
-            "Copying recv vz to device");
+    int recvTotal = mesh.recv_disp[mesh.numRanks_];
+    uint64_t* d_recvIndices = nullptr;
+    T *       d_recvDistances = nullptr, *d_recvVx = nullptr, *d_recvVy = nullptr, *d_recvVz = nullptr;
 
-        // Pass 1b: settle minimum distances for received particles
-        int recvBlocks = (mesh.recv_disp[mesh.numRanks_] + threadsPerBlock - 1) / threadsPerBlock;
-        updateMeshDistanceKernel<T><<<recvBlocks, threadsPerBlock>>>(
-            d_recvIndices, d_recvDistances, mesh.recv_disp[mesh.numRanks_], d_meshDistance);
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
+    {
+        if (recvTotal > 0)
+        {
+            checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "Allocating d_recvIndices");
+            checkCudaError(cudaMalloc(&d_recvDistances, recvTotal * sizeof(T)), "Allocating d_recvDistances");
+            checkCudaError(cudaMalloc(&d_recvVx, recvTotal * sizeof(T)), "Allocating d_recvVx");
+            checkCudaError(cudaMalloc(&d_recvVy, recvTotal * sizeof(T)), "Allocating d_recvVy");
+            checkCudaError(cudaMalloc(&d_recvVz, recvTotal * sizeof(T)), "Allocating d_recvVz");
+        }
+
+        MPI_Alltoallv(d_sendIndexNN, mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{}, d_recvIndices,
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendDistanceNN, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, d_recvDistances,
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendVxNN, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, d_recvVx,
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendVyNN, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, d_recvVy,
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendVzNN, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, d_recvVz,
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+        if (d_sendIndexNN) cudaFree(d_sendIndexNN);
+        if (d_sendDistanceNN) cudaFree(d_sendDistanceNN);
+        if (d_sendVxNN) cudaFree(d_sendVxNN);
+        if (d_sendVyNN) cudaFree(d_sendVyNN);
+        if (d_sendVzNN) cudaFree(d_sendVzNN);
+    }
+    else
+    {
+        mesh.recv_index.resize(recvTotal);
+        mesh.recv_distance.resize(recvTotal);
+        mesh.recv_vx.resize(recvTotal);
+        mesh.recv_vy.resize(recvTotal);
+        mesh.recv_vz.resize(recvTotal);
+
+        MPI_Alltoallv(mesh.send_index.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{}, mesh.recv_index.data(),
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_distance.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_distance.data(),
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_vx.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_vx.data(),
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_vy.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_vy.data(),
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_vz.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{}, mesh.recv_vz.data(),
+                      mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+        if (recvTotal > 0)
+        {
+            checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "Allocating d_recvIndices");
+            checkCudaError(cudaMalloc(&d_recvDistances, recvTotal * sizeof(T)), "Allocating d_recvDistances");
+            checkCudaError(cudaMalloc(&d_recvVx, recvTotal * sizeof(T)), "Allocating d_recvVx");
+            checkCudaError(cudaMalloc(&d_recvVy, recvTotal * sizeof(T)), "Allocating d_recvVy");
+            checkCudaError(cudaMalloc(&d_recvVz, recvTotal * sizeof(T)), "Allocating d_recvVz");
+
+            checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index.data(), recvTotal * sizeof(uint64_t), cudaMemcpyHostToDevice), "Copying recv indices to device");
+            checkCudaError(cudaMemcpy(d_recvDistances, mesh.recv_distance.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice), "Copying recv distances to device");
+            checkCudaError(cudaMemcpy(d_recvVx, mesh.recv_vx.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice), "Copying recv vx to device");
+            checkCudaError(cudaMemcpy(d_recvVy, mesh.recv_vy.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice), "Copying recv vy to device");
+            checkCudaError(cudaMemcpy(d_recvVz, mesh.recv_vz.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice), "Copying recv vz to device");
+        }
+    }
+
+    if (recvTotal > 0)
+    {
+        int recvBlocks = (recvTotal + threadsPerBlock - 1) / threadsPerBlock;
+        updateMeshDistanceKernel<T><<<recvBlocks, threadsPerBlock>>>(d_recvIndices, d_recvDistances, recvTotal, d_meshDistance);
         checkCudaError(cudaDeviceSynchronize(), "Recv distance CAS kernel");
 
-        // Pass 2: all minimum distances are now settled — assign velocities.
-        // Local particles first, then received; both check against the same meshDistance.
         if (h_localCount > 0)
         {
             int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
@@ -511,10 +629,9 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         }
         assignVelocitiesKernel<T><<<recvBlocks, threadsPerBlock>>>(
             d_recvIndices, d_recvDistances, d_recvVx, d_recvVy, d_recvVz,
-            mesh.recv_disp[mesh.numRanks_], d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance);
+            recvTotal, d_meshVelX, d_meshVelY, d_meshVelZ, d_meshDistance);
         checkCudaError(cudaDeviceSynchronize(), "Velocity assignment kernel");
 
-        // Free temporary receive buffers
         cudaFree(d_recvIndices);
         cudaFree(d_recvDistances);
         cudaFree(d_recvVx);
@@ -523,7 +640,6 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     }
     else if (h_localCount > 0)
     {
-        // No recv data — pass 2 for local particles only
         int localBlocks = (h_localCount + threadsPerBlock - 1) / threadsPerBlock;
         assignVelocitiesKernel<T><<<localBlocks, threadsPerBlock>>>(
             d_localIndices, d_localDistances, d_localVx, d_localVy, d_localVz,
@@ -531,19 +647,16 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         checkCudaError(cudaDeviceSynchronize(), "Velocity assignment kernel (local only)");
     }
 
-    // ========== Keep Device Memory for FFT ==========
     if (mesh.d_velX_) cudaFree(mesh.d_velX_);
     if (mesh.d_velY_) cudaFree(mesh.d_velY_);
     if (mesh.d_velZ_) cudaFree(mesh.d_velZ_);
     if (mesh.d_distance_) cudaFree(mesh.d_distance_);
-
     mesh.d_velX_       = d_meshVelX;
     mesh.d_velY_       = d_meshVelY;
     mesh.d_velZ_       = d_meshVelZ;
     mesh.d_distance_   = d_meshDistance;
     mesh.gpuDataValid_ = true;
 
-    // ========== Free Other Device Memory ==========
     cudaFree(d_keys);
     cudaFree(d_x);
     cudaFree(d_y);
@@ -567,9 +680,7 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     cudaFree(d_remoteVy);
     cudaFree(d_remoteVz);
     cudaFree(d_remoteCount);
-    // Note: d_meshVelX/Y/Z and d_meshDistance NOT freed — stored in mesh
 
-    // Clear send buffers
     for (int i = 0; i < mesh.numRanks_; i++)
     {
         mesh.vdataSender[i].send_index.clear();
@@ -579,8 +690,9 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
         mesh.vdataSender[i].send_vz.clear();
     }
 
-    // ========== GPU Extrapolation ==========
-    T* d_srcVelX, *d_srcVelY, *d_srcVelZ;
+    T* d_srcVelX;
+    T* d_srcVelY;
+    T* d_srcVelZ;
     checkCudaError(cudaMalloc(&d_srcVelX, inboxSize * sizeof(T)), "d_srcVelX extrap");
     checkCudaError(cudaMalloc(&d_srcVelY, inboxSize * sizeof(T)), "d_srcVelY extrap");
     checkCudaError(cudaMalloc(&d_srcVelZ, inboxSize * sizeof(T)), "d_srcVelZ extrap");
@@ -589,17 +701,163 @@ void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, 
     checkCudaError(cudaMemcpy(d_srcVelZ, mesh.d_velZ_, inboxSize * sizeof(T), cudaMemcpyDeviceToDevice), "snapshot velZ");
 
     launchExtrapolateEmptyCellsKernel<T>(d_srcVelX, d_srcVelY, d_srcVelZ,
-                                          mesh.d_velX_, mesh.d_velY_, mesh.d_velZ_,
-                                          mesh.d_distance_, d_inboxSize,
-                                          mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]);
+                                         mesh.d_velX_, mesh.d_velY_, mesh.d_velZ_,
+                                         mesh.d_distance_, d_inboxSize,
+                                         mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]);
     checkCudaError(cudaDeviceSynchronize(), "GPU extrapolate");
 
     cudaFree(d_srcVelX);
     cudaFree(d_srcVelY);
     cudaFree(d_srcVelZ);
-    cudaFree(d_inboxSize); // freed here after extrapolation kernel
+    cudaFree(d_inboxSize);
 
     std::cout << "rank = " << mesh.rank_ << " rasterize (CUDA) done!" << std::endl;
+}
+
+template<typename T>
+void rasterize_particles_to_density_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x,
+                                         std::vector<T> y, std::vector<T> z, int powerDim)
+{
+    (void)x;
+    (void)y;
+    (void)z;
+    std::cout << "rank" << mesh.rank_ << " rasterize density start (CUDA) " << powerDim << std::endl;
+    std::cout << "rank" << mesh.rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
+
+    int numParticles = keys.size();
+    std::fill(mesh.massSum_.begin(), mesh.massSum_.end(), T(0));
+    std::fill(mesh.density_.begin(), mesh.density_.end(), T(0));
+    std::fill(mesh.send_count_density.begin(), mesh.send_count_density.end(), 0);
+    std::fill(mesh.send_disp_density.begin(), mesh.send_disp_density.end(), 0);
+    std::fill(mesh.recv_disp_density.begin(), mesh.recv_disp_density.end(), 0);
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        mesh.vdataSenderDensity[i].send_index.clear();
+        mesh.vdataSenderDensity[i].send_mass.clear();
+    }
+
+    KeyType*   d_keys;
+    int*       d_procGrid;
+    uint64_t*  d_localIndices;
+    int*       d_localCount;
+    int*       d_remoteRanks;
+    uint64_t*  d_remoteIndices;
+    int*       d_remoteCount;
+
+    checkCudaError(cudaMalloc(&d_keys, numParticles * sizeof(KeyType)), "Allocating d_keys (density)");
+    checkCudaError(cudaMalloc(&d_procGrid, 3 * sizeof(int)), "Allocating d_procGrid (density)");
+    checkCudaError(cudaMalloc(&d_localIndices, numParticles * sizeof(uint64_t)), "Allocating d_localIndices (density)");
+    checkCudaError(cudaMalloc(&d_localCount, sizeof(int)), "Allocating d_localCount (density)");
+    checkCudaError(cudaMalloc(&d_remoteRanks, numParticles * sizeof(int)), "Allocating d_remoteRanks (density)");
+    checkCudaError(cudaMalloc(&d_remoteIndices, numParticles * sizeof(uint64_t)), "Allocating d_remoteIndices (density)");
+    checkCudaError(cudaMalloc(&d_remoteCount, sizeof(int)), "Allocating d_remoteCount (density)");
+
+    checkCudaError(cudaMemcpy(d_keys, keys.data(), numParticles * sizeof(KeyType), cudaMemcpyHostToDevice),
+                   "Copying keys to device (density)");
+    checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                   "Copying proc grid to device (density)");
+
+    int zeroCount = 0;
+    checkCudaError(cudaMemcpy(d_localCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
+                   "Initializing local count (density)");
+    checkCudaError(cudaMemcpy(d_remoteCount, &zeroCount, sizeof(int), cudaMemcpyHostToDevice),
+                   "Initializing remote count (density)");
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
+    classifyParticlesDensityKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
+        d_keys, numParticles, mesh.gridDim_, d_procGrid, mesh.rank_,
+        d_localIndices, d_localCount, d_remoteRanks, d_remoteIndices, d_remoteCount);
+    checkCudaError(cudaDeviceSynchronize(), "Density classification kernel execution");
+
+    int h_localCount = 0, h_remoteCount = 0;
+    checkCudaError(cudaMemcpy(&h_localCount, d_localCount, sizeof(int), cudaMemcpyDeviceToHost),
+                   "Copying local count to host (density)");
+    checkCudaError(cudaMemcpy(&h_remoteCount, d_remoteCount, sizeof(int), cudaMemcpyDeviceToHost),
+                   "Copying remote count to host (density)");
+
+    if (h_localCount > 0)
+    {
+        std::vector<uint64_t> h_localIndices(h_localCount);
+        checkCudaError(cudaMemcpy(h_localIndices.data(), d_localIndices, h_localCount * sizeof(uint64_t),
+                                  cudaMemcpyDeviceToHost),
+                       "Copying local indices to host (density)");
+        for (int i = 0; i < h_localCount; i++)
+        {
+            mesh.massSum_[h_localIndices[i]] += mesh.particleMass_;
+        }
+    }
+
+    if (h_remoteCount > 0)
+    {
+        std::vector<int> h_remoteRanks(h_remoteCount);
+        std::vector<uint64_t> h_remoteIndices(h_remoteCount);
+        checkCudaError(cudaMemcpy(h_remoteRanks.data(), d_remoteRanks, h_remoteCount * sizeof(int),
+                                  cudaMemcpyDeviceToHost),
+                       "Copying remote ranks to host (density)");
+        checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices, h_remoteCount * sizeof(uint64_t),
+                                  cudaMemcpyDeviceToHost),
+                       "Copying remote indices to host (density)");
+
+        for (int i = 0; i < h_remoteCount; i++)
+        {
+            int targetRank = h_remoteRanks[i];
+            mesh.send_count_density[targetRank]++;
+            mesh.vdataSenderDensity[targetRank].send_index.push_back(h_remoteIndices[i]);
+            mesh.vdataSenderDensity[targetRank].send_mass.push_back(mesh.particleMass_);
+        }
+    }
+
+    MPI_Alltoall(mesh.send_count_density.data(), 1, MpiType<int>{}, mesh.recv_count_density.data(), 1, MpiType<int>{},
+                 MPI_COMM_WORLD);
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        mesh.send_disp_density[i + 1] = mesh.send_disp_density[i] + mesh.send_count_density[i];
+        mesh.recv_disp_density[i + 1] = mesh.recv_disp_density[i] + mesh.recv_count_density[i];
+    }
+
+    mesh.send_index_density.resize(mesh.send_disp_density[mesh.numRanks_]);
+    mesh.send_mass_density.resize(mesh.send_disp_density[mesh.numRanks_]);
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        for (int j = mesh.send_disp_density[i]; j < mesh.send_disp_density[i + 1]; j++)
+        {
+            int local = j - mesh.send_disp_density[i];
+            mesh.send_index_density[j] = mesh.vdataSenderDensity[i].send_index[local];
+            mesh.send_mass_density[j]  = mesh.vdataSenderDensity[i].send_mass[local];
+        }
+    }
+
+    mesh.recv_index_density.resize(mesh.recv_disp_density[mesh.numRanks_]);
+    mesh.recv_mass_density.resize(mesh.recv_disp_density[mesh.numRanks_]);
+    MPI_Alltoallv(mesh.send_index_density.data(), mesh.send_count_density.data(), mesh.send_disp_density.data(),
+                  MpiType<uint64_t>{}, mesh.recv_index_density.data(), mesh.recv_count_density.data(),
+                  mesh.recv_disp_density.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+    MPI_Alltoallv(mesh.send_mass_density.data(), mesh.send_count_density.data(), mesh.send_disp_density.data(),
+                  MpiType<T>{}, mesh.recv_mass_density.data(), mesh.recv_count_density.data(),
+                  mesh.recv_disp_density.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+    for (int i = 0; i < mesh.recv_disp_density[mesh.numRanks_]; i++)
+    {
+        mesh.massSum_[mesh.recv_index_density[i]] += mesh.recv_mass_density[i];
+    }
+    mesh.finalizeDensityFromMass();
+
+    for (int i = 0; i < mesh.numRanks_; i++)
+    {
+        mesh.vdataSenderDensity[i].send_index.clear();
+        mesh.vdataSenderDensity[i].send_mass.clear();
+    }
+
+    cudaFree(d_keys);
+    cudaFree(d_procGrid);
+    cudaFree(d_localIndices);
+    cudaFree(d_localCount);
+    cudaFree(d_remoteRanks);
+    cudaFree(d_remoteIndices);
+    cudaFree(d_remoteCount);
+
+    std::cout << "rank = " << mesh.rank_ << " rasterize density (CUDA) done!" << std::endl;
 }
 
 #ifdef USE_NVSHMEM
@@ -1104,7 +1362,7 @@ __global__ void accumulateSPHContributionsKernel(uint64_t* indices, T* weights, 
 template<typename T>
 __global__ void accumulateSPHForTargetRankKernel(T* x, T* y, T* z, T* vx, T* vy, T* vz, T* h,
                                                  int numParticles, int gridDim, T Lmin, T Lmax,
-                                                 int* procGrid, int targetRank,
+                                                 int* targetLow, int* targetHigh, int* targetSize,
                                                  T* outWeightSum, T* outWeightedVelX,
                                                  T* outWeightedVelY, T* outWeightedVelZ)
 {
@@ -1131,19 +1389,34 @@ __global__ void accumulateSPHForTargetRankKernel(T* x, T* y, T* z, T* vx, T* vy,
     int minK = static_cast<int>((pz - searchRadius - Lmin) / deltaMesh);
     int maxK = static_cast<int>((pz + searchRadius - Lmin) / deltaMesh) + 1;
 
-    minI = max(0, minI); maxI = min(gridDim, maxI);
-    minJ = max(0, minJ); maxJ = min(gridDim, maxJ);
-    minK = max(0, minK); maxK = min(gridDim, maxK);
+    int lowI = targetLow[0], lowJ = targetLow[1], lowK = targetLow[2];
+    int highI = targetHigh[0], highJ = targetHigh[1], highK = targetHigh[2];
+    int sizeI = targetSize[0], sizeJ = targetSize[1];
+
+    minI = max(max(0, minI), lowI);
+    maxI = min(min(gridDim, maxI), highI + 1);
+    minJ = max(max(0, minJ), lowJ);
+    maxJ = min(min(gridDim, maxJ), highJ + 1);
+    minK = max(max(0, minK), lowK);
+    maxK = min(min(gridDim, maxK), highK + 1);
+
+    if (minI >= maxI || minJ >= maxJ || minK >= maxK) return;
+
+    T deltaHalf = deltaMesh / 2;
+    T baseCenter = Lmin + deltaHalf;
 
     for (int i = minI; i < maxI; i++)
     {
+        T cellX = baseCenter + deltaMesh * i;
+        int iLocal = i - lowI;
         for (int j = minJ; j < maxJ; j++)
         {
+            T cellY = baseCenter + deltaMesh * j;
+            int jLocal = j - lowJ;
             for (int k = minK; k < maxK; k++)
             {
-                T cellX = getCellCenterDevice(i, Lmin, Lmax, gridDim);
-                T cellY = getCellCenterDevice(j, Lmin, Lmax, gridDim);
-                T cellZ = getCellCenterDevice(k, Lmin, Lmax, gridDim);
+                T cellZ = baseCenter + deltaMesh * k;
+                int kLocal = k - lowK;
                 T dx = px - cellX;
                 T dy = py - cellY;
                 T dz = pz - cellZ;
@@ -1154,18 +1427,9 @@ __global__ void accumulateSPHForTargetRankKernel(T* x, T* y, T* z, T* vx, T* vy,
                 T weight = sphKernelDevice(dist, h_eff);
                 if (weight <= 0.0) continue;
 
-                int xBox, yBox, zBox;
-                int xLocal, yLocal, zLocal;
-                int xSize, ySize, zSize;
-                decomposeGlobalIndex1D(i, gridDim, procGrid[0], xBox, xLocal, xSize);
-                decomposeGlobalIndex1D(j, gridDim, procGrid[1], yBox, yLocal, ySize);
-                decomposeGlobalIndex1D(k, gridDim, procGrid[2], zBox, zLocal, zSize);
-                int owner = xBox + yBox * procGrid[0] + zBox * procGrid[0] * procGrid[1];
-                if (owner != targetRank) continue;
-
-                uint64_t inboxIndex = static_cast<uint64_t>(xLocal) +
-                                      static_cast<uint64_t>(yLocal) * xSize +
-                                      static_cast<uint64_t>(zLocal) * xSize * ySize;
+                uint64_t inboxIndex = static_cast<uint64_t>(iLocal) +
+                                      static_cast<uint64_t>(jLocal) * sizeI +
+                                      static_cast<uint64_t>(kLocal) * sizeI * sizeJ;
                 atomicAdd(&outWeightSum[inboxIndex], weight);
                 atomicAdd(&outWeightedVelX[inboxIndex], pvx * weight);
                 atomicAdd(&outWeightedVelY[inboxIndex], pvy * weight);
@@ -1225,18 +1489,16 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
 
     // ========== Device Memory Allocation ==========
     // Input particle data
-    KeyType* d_keys;
     T *      d_x, *d_y, *d_z, *d_vx, *d_vy, *d_vz, *d_h;
 
     // Mesh configuration
-    int *d_inboxLow, *d_inboxHigh, *d_inboxSize, *d_procGrid;
+    int *d_inboxSize, *d_targetLow, *d_targetHigh, *d_targetSize;
 
     // SPH accumulation arrays
     T *d_meshWeightSum, *d_meshWeightedVelX, *d_meshWeightedVelY, *d_meshWeightedVelZ;
     T *d_meshVelX, *d_meshVelY, *d_meshVelZ;
 
     // Allocate device memory
-    checkCudaError(cudaMalloc(&d_keys, numParticles * sizeof(KeyType)), "Allocating d_keys");
     checkCudaError(cudaMalloc(&d_x, numParticles * sizeof(T)), "Allocating d_x");
     checkCudaError(cudaMalloc(&d_y, numParticles * sizeof(T)), "Allocating d_y");
     checkCudaError(cudaMalloc(&d_z, numParticles * sizeof(T)), "Allocating d_z");
@@ -1245,10 +1507,10 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     checkCudaError(cudaMalloc(&d_vz, numParticles * sizeof(T)), "Allocating d_vz");
     checkCudaError(cudaMalloc(&d_h, numParticles * sizeof(T)), "Allocating d_h");
 
-    checkCudaError(cudaMalloc(&d_inboxLow, 3 * sizeof(int)), "Allocating d_inboxLow");
-    checkCudaError(cudaMalloc(&d_inboxHigh, 3 * sizeof(int)), "Allocating d_inboxHigh");
     checkCudaError(cudaMalloc(&d_inboxSize, 3 * sizeof(int)), "Allocating d_inboxSize");
-    checkCudaError(cudaMalloc(&d_procGrid, 3 * sizeof(int)), "Allocating d_procGrid");
+    checkCudaError(cudaMalloc(&d_targetLow, 3 * sizeof(int)), "Allocating d_targetLow");
+    checkCudaError(cudaMalloc(&d_targetHigh, 3 * sizeof(int)), "Allocating d_targetHigh");
+    checkCudaError(cudaMalloc(&d_targetSize, 3 * sizeof(int)), "Allocating d_targetSize");
 
     int threadsPerBlock = 256;
     int blocksPerGrid   = (numParticles + threadsPerBlock - 1) / threadsPerBlock;
@@ -1257,8 +1519,6 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     std::array<int, 3> inboxSizeArr = {mesh.inbox_.size[0], mesh.inbox_.size[1], mesh.inbox_.size[2]};
     checkCudaError(cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
                     "Copying inbox size to device");
-    checkCudaError(cudaMemcpy(d_procGrid, mesh.proc_grid_.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying proc_grid to device");
     checkCudaError(cudaMemcpy(d_x, x.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying x to device");
     checkCudaError(cudaMemcpy(d_y, y.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying y to device");
     checkCudaError(cudaMemcpy(d_z, z.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying z to device");
@@ -1278,54 +1538,85 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     checkCudaError(cudaMemcpy(d_vy, vy.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vy to device");
     checkCudaError(cudaMemcpy(d_vz, vz.data(), numParticles * sizeof(T), cudaMemcpyHostToDevice), "Copying vz to device");
 
-    // Copy remaining mesh configuration (inboxLow and inboxHigh needed for compute kernel)
-    // Note: d_inboxSize and d_procGrid already copied during counting phase
-    std::array<int, 3> inboxLow     = {mesh.inbox_.low[0], mesh.inbox_.low[1], mesh.inbox_.low[2]};
-    std::array<int, 3> inboxHigh    = {mesh.inbox_.high[0], mesh.inbox_.high[1], mesh.inbox_.high[2]};
-    checkCudaError(cudaMemcpy(d_inboxLow, inboxLow.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying inbox low to device");
-    checkCudaError(cudaMemcpy(d_inboxHigh, inboxHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
-                    "Copying inbox high to device");
-
     // Initialize local accumulation arrays
     checkCudaError(cudaMemset(d_meshWeightSum, 0, inboxSize * sizeof(T)), "Initializing mesh weight sum");
     checkCudaError(cudaMemset(d_meshWeightedVelX, 0, inboxSize * sizeof(T)), "Initializing mesh weighted velX");
     checkCudaError(cudaMemset(d_meshWeightedVelY, 0, inboxSize * sizeof(T)), "Initializing mesh weighted velY");
     checkCudaError(cudaMemset(d_meshWeightedVelZ, 0, inboxSize * sizeof(T)), "Initializing mesh weighted velZ");
 
+    std::array<int, 3> localLow  = rankInboxLowHost(mesh.rank_, mesh.gridDim_, mesh.proc_grid_.data());
+    std::array<int, 3> localSize = rankInboxSizeHost(mesh.rank_, mesh.gridDim_, mesh.proc_grid_.data());
+    std::array<int, 3> localHigh = {localLow[0] + localSize[0] - 1,
+                                    localLow[1] + localSize[1] - 1,
+                                    localLow[2] + localSize[2] - 1};
+    checkCudaError(cudaMemcpy(d_targetLow, localLow.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying local target low to device");
+    checkCudaError(cudaMemcpy(d_targetHigh, localHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying local target high to device");
+    checkCudaError(cudaMemcpy(d_targetSize, localSize.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                    "Copying local target size to device");
+
     accumulateSPHForTargetRankKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
         d_x, d_y, d_z, d_vx, d_vy, d_vz, d_h, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_,
-        d_procGrid, mesh.rank_, d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY, d_meshWeightedVelZ);
+        d_targetLow, d_targetHigh, d_targetSize,
+        d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY, d_meshWeightedVelZ);
     checkCudaError(cudaDeviceSynchronize(), "SPH local accumulation kernel execution");
 
     // ========== Remote SPH Aggregation by Target Rank ==========
+    uint64_t maxTargetInboxSize = 0;
+    for (int targetRank = 0; targetRank < mesh.numRanks_; targetRank++)
+    {
+        if (targetRank == mesh.rank_) continue;
+        auto targetSize = rankInboxSizeHost(targetRank, mesh.gridDim_, mesh.proc_grid_.data());
+        uint64_t targetInboxSize = static_cast<uint64_t>(targetSize[0]) * targetSize[1] * targetSize[2];
+        maxTargetInboxSize = std::max(maxTargetInboxSize, targetInboxSize);
+    }
+
+    T *d_remoteWeightSum = nullptr, *d_remoteWeightedVelX = nullptr, *d_remoteWeightedVelY = nullptr,
+      *d_remoteWeightedVelZ = nullptr;
+    std::vector<T> h_remoteWeightSum(maxTargetInboxSize);
+    std::vector<T> h_remoteWeightedVelX(maxTargetInboxSize);
+    std::vector<T> h_remoteWeightedVelY(maxTargetInboxSize);
+    std::vector<T> h_remoteWeightedVelZ(maxTargetInboxSize);
+
+    if (maxTargetInboxSize > 0)
+    {
+        checkCudaError(cudaMalloc(&d_remoteWeightSum, maxTargetInboxSize * sizeof(T)), "Allocating d_remoteWeightSum");
+        checkCudaError(cudaMalloc(&d_remoteWeightedVelX, maxTargetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelX");
+        checkCudaError(cudaMalloc(&d_remoteWeightedVelY, maxTargetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelY");
+        checkCudaError(cudaMalloc(&d_remoteWeightedVelZ, maxTargetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelZ");
+    }
+
     for (int targetRank = 0; targetRank < mesh.numRanks_; targetRank++)
     {
         if (targetRank == mesh.rank_) continue;
 
+        auto targetLow = rankInboxLowHost(targetRank, mesh.gridDim_, mesh.proc_grid_.data());
         auto targetSize = rankInboxSizeHost(targetRank, mesh.gridDim_, mesh.proc_grid_.data());
+        auto targetHigh = std::array<int, 3>{targetLow[0] + targetSize[0] - 1,
+                                             targetLow[1] + targetSize[1] - 1,
+                                             targetLow[2] + targetSize[2] - 1};
         uint64_t targetInboxSize = static_cast<uint64_t>(targetSize[0]) * targetSize[1] * targetSize[2];
         if (targetInboxSize == 0) continue;
 
-        T *d_remoteWeightSum = nullptr, *d_remoteWeightedVelX = nullptr, *d_remoteWeightedVelY = nullptr, *d_remoteWeightedVelZ = nullptr;
-        checkCudaError(cudaMalloc(&d_remoteWeightSum, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightSum");
-        checkCudaError(cudaMalloc(&d_remoteWeightedVelX, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelX");
-        checkCudaError(cudaMalloc(&d_remoteWeightedVelY, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelY");
-        checkCudaError(cudaMalloc(&d_remoteWeightedVelZ, targetInboxSize * sizeof(T)), "Allocating d_remoteWeightedVelZ");
         checkCudaError(cudaMemset(d_remoteWeightSum, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightSum");
         checkCudaError(cudaMemset(d_remoteWeightedVelX, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightedVelX");
         checkCudaError(cudaMemset(d_remoteWeightedVelY, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightedVelY");
         checkCudaError(cudaMemset(d_remoteWeightedVelZ, 0, targetInboxSize * sizeof(T)), "Memset d_remoteWeightedVelZ");
 
+        checkCudaError(cudaMemcpy(d_targetLow, targetLow.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                        "Copying remote target low to device");
+        checkCudaError(cudaMemcpy(d_targetHigh, targetHigh.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                        "Copying remote target high to device");
+        checkCudaError(cudaMemcpy(d_targetSize, targetSize.data(), 3 * sizeof(int), cudaMemcpyHostToDevice),
+                        "Copying remote target size to device");
+
         accumulateSPHForTargetRankKernel<T><<<blocksPerGrid, threadsPerBlock>>>(
             d_x, d_y, d_z, d_vx, d_vy, d_vz, d_h, numParticles, mesh.gridDim_, mesh.Lmin_, mesh.Lmax_,
-            d_procGrid, targetRank, d_remoteWeightSum, d_remoteWeightedVelX, d_remoteWeightedVelY, d_remoteWeightedVelZ);
-        checkCudaError(cudaDeviceSynchronize(), "SPH remote rank aggregation kernel execution");
+            d_targetLow, d_targetHigh, d_targetSize,
+            d_remoteWeightSum, d_remoteWeightedVelX, d_remoteWeightedVelY, d_remoteWeightedVelZ);
+        checkCudaError(cudaGetLastError(), "SPH remote rank aggregation kernel launch");
 
-        std::vector<T> h_remoteWeightSum(targetInboxSize);
-        std::vector<T> h_remoteWeightedVelX(targetInboxSize);
-        std::vector<T> h_remoteWeightedVelY(targetInboxSize);
-        std::vector<T> h_remoteWeightedVelZ(targetInboxSize);
         checkCudaError(cudaMemcpy(h_remoteWeightSum.data(), d_remoteWeightSum, targetInboxSize * sizeof(T), cudaMemcpyDeviceToHost),
                        "Copying aggregated remote weight sum");
         checkCudaError(cudaMemcpy(h_remoteWeightedVelX.data(), d_remoteWeightedVelX, targetInboxSize * sizeof(T), cudaMemcpyDeviceToHost),
@@ -1346,12 +1637,12 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
             sender.send_weighted_vy.push_back(h_remoteWeightedVelY[idx]);
             sender.send_weighted_vz.push_back(h_remoteWeightedVelZ[idx]);
         }
-
-        cudaFree(d_remoteWeightSum);
-        cudaFree(d_remoteWeightedVelX);
-        cudaFree(d_remoteWeightedVelY);
-        cudaFree(d_remoteWeightedVelZ);
     }
+
+    if (d_remoteWeightSum) cudaFree(d_remoteWeightSum);
+    if (d_remoteWeightedVelX) cudaFree(d_remoteWeightedVelX);
+    if (d_remoteWeightedVelY) cudaFree(d_remoteWeightedVelY);
+    if (d_remoteWeightedVelZ) cudaFree(d_remoteWeightedVelZ);
 
     // std::cout << "rank = " << mesh.rank_ << " particleIndex = " << numParticles << std::endl;
     // for (int i = 0; i < mesh.numRanks_; i++)
@@ -1372,7 +1663,6 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     mesh.send_weighted_vx.resize(mesh.send_disp[mesh.numRanks_]);
     mesh.send_weighted_vy.resize(mesh.send_disp[mesh.numRanks_]);
     mesh.send_weighted_vz.resize(mesh.send_disp[mesh.numRanks_]);
-    std::cout << "rank = " << mesh.rank_ << " buffers allocated" << std::endl;
 
     for (int i = 0; i < mesh.numRanks_; i++)
     {
@@ -1386,71 +1676,96 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
             mesh.send_weighted_vz[j] = mesh.vdataSenderSPH[i].send_weighted_vz[localIdx];
         }
     }
-    std::cout << "rank = " << mesh.rank_ << " buffers transformed" << std::endl;
 
-    // Prepare receive buffers
-    mesh.recv_index_sph.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_weight.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_weighted_vx.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_weighted_vy.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_weighted_vz.resize(mesh.recv_disp[mesh.numRanks_]);
+    int recvTotal = mesh.recv_disp[mesh.numRanks_];
 
-    MPI_Alltoallv(mesh.send_index_sph.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
-                  mesh.recv_index_sph.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{},
-                  MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_weight.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_weight.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_weighted_vx.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_weighted_vx.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
-                  MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_weighted_vy.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_weighted_vy.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
-                  MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_weighted_vz.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_weighted_vz.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
-                  MPI_COMM_WORLD);
-    std::cout << "rank = " << mesh.rank_ << " alltoallv done!" << std::endl;
+    uint64_t* d_recvIndices = nullptr;
+    T *       d_recvWeights = nullptr, *d_recvWeightedVx = nullptr, *d_recvWeightedVy = nullptr,
+      *d_recvWeightedVz = nullptr;
+
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
+    {
+                int sendTotal = mesh.send_disp[mesh.numRanks_];
+                (void)sendTotal;
+
+        if (recvTotal > 0)
+        {
+            checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "Allocating d_recvIndices");
+            checkCudaError(cudaMalloc(&d_recvWeights, recvTotal * sizeof(T)), "Allocating d_recvWeights");
+            checkCudaError(cudaMalloc(&d_recvWeightedVx, recvTotal * sizeof(T)), "Allocating d_recvWeightedVx");
+            checkCudaError(cudaMalloc(&d_recvWeightedVy, recvTotal * sizeof(T)), "Allocating d_recvWeightedVy");
+            checkCudaError(cudaMalloc(&d_recvWeightedVz, recvTotal * sizeof(T)), "Allocating d_recvWeightedVz");
+        }
+
+        MPI_Alltoallv(mesh.send_index_sph.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
+                      d_recvIndices, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{},
+                      MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weight.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvWeights, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weighted_vx.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvWeightedVx, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weighted_vy.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvWeightedVy, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weighted_vz.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvWeightedVz, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+    }
+    else
+    {
+        // Prepare receive buffers
+        mesh.recv_index_sph.resize(recvTotal);
+        mesh.recv_weight.resize(recvTotal);
+        mesh.recv_weighted_vx.resize(recvTotal);
+        mesh.recv_weighted_vy.resize(recvTotal);
+        mesh.recv_weighted_vz.resize(recvTotal);
+
+        MPI_Alltoallv(mesh.send_index_sph.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
+                      mesh.recv_index_sph.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{},
+                      MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weight.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_weight.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weighted_vx.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_weighted_vx.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weighted_vy.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_weighted_vy.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_weighted_vz.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_weighted_vz.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+
+        if (recvTotal > 0)
+        {
+            checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "Allocating d_recvIndices");
+            checkCudaError(cudaMalloc(&d_recvWeights, recvTotal * sizeof(T)), "Allocating d_recvWeights");
+            checkCudaError(cudaMalloc(&d_recvWeightedVx, recvTotal * sizeof(T)), "Allocating d_recvWeightedVx");
+            checkCudaError(cudaMalloc(&d_recvWeightedVy, recvTotal * sizeof(T)), "Allocating d_recvWeightedVy");
+            checkCudaError(cudaMalloc(&d_recvWeightedVz, recvTotal * sizeof(T)), "Allocating d_recvWeightedVz");
+
+            checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index_sph.data(), recvTotal * sizeof(uint64_t), cudaMemcpyHostToDevice),
+                            "Copying recv indices to device");
+            checkCudaError(cudaMemcpy(d_recvWeights, mesh.recv_weight.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice),
+                            "Copying recv weights to device");
+            checkCudaError(cudaMemcpy(d_recvWeightedVx, mesh.recv_weighted_vx.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice),
+                            "Copying recv weighted vx to device");
+            checkCudaError(cudaMemcpy(d_recvWeightedVy, mesh.recv_weighted_vy.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice),
+                            "Copying recv weighted vy to device");
+            checkCudaError(cudaMemcpy(d_recvWeightedVz, mesh.recv_weighted_vz.data(), recvTotal * sizeof(T), cudaMemcpyHostToDevice),
+                            "Copying recv weighted vz to device");
+        }
+    }
 
     // ========== Accumulate Received Contributions on GPU ==========
-    if (mesh.recv_disp[mesh.numRanks_] > 0)
+    if (recvTotal > 0)
     {
-        // Allocate device memory for received data
-        uint64_t* d_recvIndices;
-        T *       d_recvWeights, *d_recvWeightedVx, *d_recvWeightedVy, *d_recvWeightedVz;
-
-        checkCudaError(cudaMalloc(&d_recvIndices, mesh.recv_disp[mesh.numRanks_] * sizeof(uint64_t)),
-                        "Allocating d_recvIndices");
-        checkCudaError(cudaMalloc(&d_recvWeights, mesh.recv_disp[mesh.numRanks_] * sizeof(T)),
-                        "Allocating d_recvWeights");
-        checkCudaError(cudaMalloc(&d_recvWeightedVx, mesh.recv_disp[mesh.numRanks_] * sizeof(T)),
-                        "Allocating d_recvWeightedVx");
-        checkCudaError(cudaMalloc(&d_recvWeightedVy, mesh.recv_disp[mesh.numRanks_] * sizeof(T)),
-                        "Allocating d_recvWeightedVy");
-        checkCudaError(cudaMalloc(&d_recvWeightedVz, mesh.recv_disp[mesh.numRanks_] * sizeof(T)),
-                        "Allocating d_recvWeightedVz");
-
-        // Copy received data to device
-        checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index_sph.data(),
-                                    mesh.recv_disp[mesh.numRanks_] * sizeof(uint64_t), cudaMemcpyHostToDevice),
-                        "Copying recv indices to device");
-        checkCudaError(cudaMemcpy(d_recvWeights, mesh.recv_weight.data(), mesh.recv_disp[mesh.numRanks_] * sizeof(T),
-                                    cudaMemcpyHostToDevice),
-                        "Copying recv weights to device");
-        checkCudaError(cudaMemcpy(d_recvWeightedVx, mesh.recv_weighted_vx.data(),
-                                    mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
-                        "Copying recv weighted vx to device");
-        checkCudaError(cudaMemcpy(d_recvWeightedVy, mesh.recv_weighted_vy.data(),
-                                    mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
-                        "Copying recv weighted vy to device");
-        checkCudaError(cudaMemcpy(d_recvWeightedVz, mesh.recv_weighted_vz.data(),
-                                    mesh.recv_disp[mesh.numRanks_] * sizeof(T), cudaMemcpyHostToDevice),
-                        "Copying recv weighted vz to device");
 
         // Launch kernel to accumulate received contributions
-        int recvBlocks = (mesh.recv_disp[mesh.numRanks_] + threadsPerBlock - 1) / threadsPerBlock;
+        int recvBlocks = (recvTotal + threadsPerBlock - 1) / threadsPerBlock;
         accumulateSPHContributionsKernel<T><<<recvBlocks, threadsPerBlock>>>(
             d_recvIndices, d_recvWeights, d_recvWeightedVx, d_recvWeightedVy, d_recvWeightedVz,
-            mesh.recv_disp[mesh.numRanks_], d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY,
+            recvTotal, d_meshWeightSum, d_meshWeightedVelX, d_meshWeightedVelY,
             d_meshWeightedVelZ);
         checkCudaError(cudaDeviceSynchronize(), "Received SPH accumulation kernel");
 
@@ -1488,7 +1803,6 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     mesh.gpuDataValid_ = true;
 
     // ========== Free Other Device Memory ==========
-    cudaFree(d_keys);
     cudaFree(d_x);
     cudaFree(d_y);
     cudaFree(d_z);
@@ -1496,9 +1810,9 @@ void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> ke
     cudaFree(d_vy);
     cudaFree(d_vz);
     cudaFree(d_h);
-    cudaFree(d_inboxLow);
-    cudaFree(d_inboxHigh);
-    cudaFree(d_procGrid);
+    cudaFree(d_targetLow);
+    cudaFree(d_targetHigh);
+    cudaFree(d_targetSize);
     cudaFree(d_meshWeightSum);
     cudaFree(d_meshWeightedVelX);
     cudaFree(d_meshWeightedVelY);
@@ -1740,30 +2054,51 @@ void rasterize_particles_to_mesh_cell_avg_cuda(Mesh<T>& mesh, std::vector<KeyTyp
         checkCudaError(cudaDeviceSynchronize(), "accumulate local cell_avg");
     }
 
-    // ===== Copy remote particles to host, organise by rank, MPI exchange =====
-    std::vector<int>      h_remoteRanks(h_remoteCount);
-    std::vector<uint64_t> h_remoteIndices(h_remoteCount);
-    std::vector<T>        h_remoteVx(h_remoteCount), h_remoteVy(h_remoteCount), h_remoteVz(h_remoteCount);
-
-    if (h_remoteCount > 0)
-    {
-        checkCudaError(cudaMemcpy(h_remoteRanks.data(),   d_remoteRanks,    h_remoteCount * sizeof(int),      cudaMemcpyDeviceToHost), "cp remoteRanks");
-        checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices,  h_remoteCount * sizeof(uint64_t), cudaMemcpyDeviceToHost), "cp remoteIndices");
-        checkCudaError(cudaMemcpy(h_remoteVx.data(),      d_remoteVx,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVx");
-        checkCudaError(cudaMemcpy(h_remoteVy.data(),      d_remoteVy,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVy");
-        checkCudaError(cudaMemcpy(h_remoteVz.data(),      d_remoteVz,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVz");
-    }
+    uint64_t* d_sendIndexCavg = nullptr;
+    T *       d_sendVxCavg = nullptr, *d_sendVyCavg = nullptr, *d_sendVzCavg = nullptr;
 
     std::fill(mesh.send_count.begin(), mesh.send_count.end(), 0);
     std::fill(mesh.send_disp.begin(),  mesh.send_disp.end(),  0);
-    for (int i = 0; i < h_remoteCount; i++)
+
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
     {
-        int r = h_remoteRanks[i];
-        mesh.send_count[r]++;
-        mesh.vdataSenderCellAvg[r].send_index.push_back(h_remoteIndices[i]);
-        mesh.vdataSenderCellAvg[r].send_vx.push_back(h_remoteVx[i]);
-        mesh.vdataSenderCellAvg[r].send_vy.push_back(h_remoteVy[i]);
-        mesh.vdataSenderCellAvg[r].send_vz.push_back(h_remoteVz[i]);
+        int* d_sendCount = nullptr;
+        checkCudaError(cudaMalloc(&d_sendCount, mesh.numRanks_ * sizeof(int)), "d_sendCount cavg");
+        checkCudaError(cudaMemset(d_sendCount, 0, mesh.numRanks_ * sizeof(int)), "memset d_sendCount cavg");
+        if (h_remoteCount > 0)
+        {
+            int rb = (h_remoteCount + threadsPerBlock - 1) / threadsPerBlock;
+            countRemoteByRankKernel<<<rb, threadsPerBlock>>>(d_remoteRanks, h_remoteCount, d_sendCount);
+            checkCudaError(cudaDeviceSynchronize(), "countRemoteByRankKernel cavg");
+        }
+        checkCudaError(cudaMemcpy(mesh.send_count.data(), d_sendCount, mesh.numRanks_ * sizeof(int), cudaMemcpyDeviceToHost),
+                       "cp send_count cavg");
+        cudaFree(d_sendCount);
+    }
+    else
+    {
+        std::vector<int>      h_remoteRanks(h_remoteCount);
+        std::vector<uint64_t> h_remoteIndices(h_remoteCount);
+        std::vector<T>        h_remoteVx(h_remoteCount), h_remoteVy(h_remoteCount), h_remoteVz(h_remoteCount);
+
+        if (h_remoteCount > 0)
+        {
+            checkCudaError(cudaMemcpy(h_remoteRanks.data(),   d_remoteRanks,    h_remoteCount * sizeof(int),      cudaMemcpyDeviceToHost), "cp remoteRanks");
+            checkCudaError(cudaMemcpy(h_remoteIndices.data(), d_remoteIndices,  h_remoteCount * sizeof(uint64_t), cudaMemcpyDeviceToHost), "cp remoteIndices");
+            checkCudaError(cudaMemcpy(h_remoteVx.data(),      d_remoteVx,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVx");
+            checkCudaError(cudaMemcpy(h_remoteVy.data(),      d_remoteVy,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVy");
+            checkCudaError(cudaMemcpy(h_remoteVz.data(),      d_remoteVz,       h_remoteCount * sizeof(T),        cudaMemcpyDeviceToHost), "cp remoteVz");
+        }
+
+        for (int i = 0; i < h_remoteCount; i++)
+        {
+            int r = h_remoteRanks[i];
+            mesh.send_count[r]++;
+            mesh.vdataSenderCellAvg[r].send_index.push_back(h_remoteIndices[i]);
+            mesh.vdataSenderCellAvg[r].send_vx.push_back(h_remoteVx[i]);
+            mesh.vdataSenderCellAvg[r].send_vy.push_back(h_remoteVy[i]);
+            mesh.vdataSenderCellAvg[r].send_vz.push_back(h_remoteVz[i]);
+        }
     }
 
     MPI_Alltoall(mesh.send_count.data(), 1, MpiType<int>{}, mesh.recv_count.data(), 1, MpiType<int>{}, MPI_COMM_WORLD);
@@ -1774,50 +2109,117 @@ void rasterize_particles_to_mesh_cell_avg_cuda(Mesh<T>& mesh, std::vector<KeyTyp
         mesh.recv_disp[i + 1] = mesh.recv_disp[i] + mesh.recv_count[i];
     }
 
-    mesh.send_index_cavg.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_vx_cavg.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_vy_cavg.resize(mesh.send_disp[mesh.numRanks_]);
-    mesh.send_vz_cavg.resize(mesh.send_disp[mesh.numRanks_]);
-
-    for (int i = 0; i < mesh.numRanks_; i++)
-        for (int j = mesh.send_disp[i]; j < mesh.send_disp[i + 1]; j++)
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
+    {
+        int sendTotal = mesh.send_disp[mesh.numRanks_];
+        if (sendTotal > 0)
         {
-            int local = j - mesh.send_disp[i];
-            mesh.send_index_cavg[j] = mesh.vdataSenderCellAvg[i].send_index[local];
-            mesh.send_vx_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vx[local];
-            mesh.send_vy_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vy[local];
-            mesh.send_vz_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vz[local];
+            checkCudaError(cudaMalloc(&d_sendIndexCavg, sendTotal * sizeof(uint64_t)), "d_sendIndexCavg");
+            checkCudaError(cudaMalloc(&d_sendVxCavg, sendTotal * sizeof(T)), "d_sendVxCavg");
+            checkCudaError(cudaMalloc(&d_sendVyCavg, sendTotal * sizeof(T)), "d_sendVyCavg");
+            checkCudaError(cudaMalloc(&d_sendVzCavg, sendTotal * sizeof(T)), "d_sendVzCavg");
+
+            int* d_sendDisp = nullptr;
+            int* d_writeOff = nullptr;
+            checkCudaError(cudaMalloc(&d_sendDisp, mesh.numRanks_ * sizeof(int)), "d_sendDisp cavg");
+            checkCudaError(cudaMalloc(&d_writeOff, mesh.numRanks_ * sizeof(int)), "d_writeOff cavg");
+            checkCudaError(cudaMemcpy(d_sendDisp, mesh.send_disp.data(), mesh.numRanks_ * sizeof(int), cudaMemcpyHostToDevice),
+                           "cp send_disp cavg");
+            checkCudaError(cudaMemset(d_writeOff, 0, mesh.numRanks_ * sizeof(int)), "memset d_writeOff cavg");
+
+            if (h_remoteCount > 0)
+            {
+                int rb = (h_remoteCount + threadsPerBlock - 1) / threadsPerBlock;
+                packCellAvgByRankKernel<T><<<rb, threadsPerBlock>>>(
+                    d_remoteRanks, d_remoteIndices, d_remoteVx, d_remoteVy, d_remoteVz,
+                    h_remoteCount, d_sendDisp, d_writeOff,
+                    d_sendIndexCavg, d_sendVxCavg, d_sendVyCavg, d_sendVzCavg);
+                checkCudaError(cudaDeviceSynchronize(), "packCellAvgByRankKernel");
+            }
+            cudaFree(d_sendDisp);
+            cudaFree(d_writeOff);
+        }
+    }
+    else
+    {
+        mesh.send_index_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_vx_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_vy_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+        mesh.send_vz_cavg.resize(mesh.send_disp[mesh.numRanks_]);
+
+        for (int i = 0; i < mesh.numRanks_; i++)
+            for (int j = mesh.send_disp[i]; j < mesh.send_disp[i + 1]; j++)
+            {
+                int local = j - mesh.send_disp[i];
+                mesh.send_index_cavg[j] = mesh.vdataSenderCellAvg[i].send_index[local];
+                mesh.send_vx_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vx[local];
+                mesh.send_vy_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vy[local];
+                mesh.send_vz_cavg[j]    = mesh.vdataSenderCellAvg[i].send_vz[local];
+            }
+    }
+
+    int recvTotal = mesh.recv_disp[mesh.numRanks_];
+
+    uint64_t* d_recvIndices = nullptr;
+    T *       d_recvVx = nullptr, *d_recvVy = nullptr, *d_recvVz = nullptr;
+
+    if (mesh.useCudaAwareMpi_ && mesh.useCudaAwareGpuPack_)
+    {
+        if (recvTotal > 0)
+        {
+            checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "d_recvIndices cavg");
+            checkCudaError(cudaMalloc(&d_recvVx, recvTotal * sizeof(T)), "d_recvVx cavg");
+            checkCudaError(cudaMalloc(&d_recvVy, recvTotal * sizeof(T)), "d_recvVy cavg");
+            checkCudaError(cudaMalloc(&d_recvVz, recvTotal * sizeof(T)), "d_recvVz cavg");
         }
 
-    mesh.recv_index_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_vx_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_vy_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
-    mesh.recv_vz_cavg.resize(mesh.recv_disp[mesh.numRanks_]);
+        MPI_Alltoallv(d_sendIndexCavg, mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
+                      d_recvIndices, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendVxCavg, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvVx, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendVyCavg, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvVy, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(d_sendVzCavg, mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      d_recvVz, mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
 
-    MPI_Alltoallv(mesh.send_index_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
-                  mesh.recv_index_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_vx_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_vx_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_vy_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_vy_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
-    MPI_Alltoallv(mesh.send_vz_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
-                  mesh.recv_vz_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        if (d_sendIndexCavg) cudaFree(d_sendIndexCavg);
+        if (d_sendVxCavg) cudaFree(d_sendVxCavg);
+        if (d_sendVyCavg) cudaFree(d_sendVyCavg);
+        if (d_sendVzCavg) cudaFree(d_sendVzCavg);
+    }
+    else
+    {
+        mesh.recv_index_cavg.resize(recvTotal);
+        mesh.recv_vx_cavg.resize(recvTotal);
+        mesh.recv_vy_cavg.resize(recvTotal);
+        mesh.recv_vz_cavg.resize(recvTotal);
+
+        MPI_Alltoallv(mesh.send_index_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<uint64_t>{},
+                      mesh.recv_index_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_vx_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_vx_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_vy_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_vy_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(mesh.send_vz_cavg.data(), mesh.send_count.data(), mesh.send_disp.data(), MpiType<T>{},
+                      mesh.recv_vz_cavg.data(), mesh.recv_count.data(), mesh.recv_disp.data(), MpiType<T>{}, MPI_COMM_WORLD);
+
+        if (recvTotal > 0)
+        {
+            checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "d_recvIndices cavg");
+            checkCudaError(cudaMalloc(&d_recvVx,      recvTotal * sizeof(T)),        "d_recvVx cavg");
+            checkCudaError(cudaMalloc(&d_recvVy,      recvTotal * sizeof(T)),        "d_recvVy cavg");
+            checkCudaError(cudaMalloc(&d_recvVz,      recvTotal * sizeof(T)),        "d_recvVz cavg");
+
+            checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index_cavg.data(), recvTotal * sizeof(uint64_t), cudaMemcpyHostToDevice), "cp recv idx cavg");
+            checkCudaError(cudaMemcpy(d_recvVx,      mesh.recv_vx_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vx cavg");
+            checkCudaError(cudaMemcpy(d_recvVy,      mesh.recv_vy_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vy cavg");
+            checkCudaError(cudaMemcpy(d_recvVz,      mesh.recv_vz_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vz cavg");
+        }
+    }
 
     // ===== Accumulate received particles on device =====
-    int recvTotal = mesh.recv_disp[mesh.numRanks_];
     if (recvTotal > 0)
     {
-        uint64_t* d_recvIndices;
-        T *       d_recvVx, *d_recvVy, *d_recvVz;
-        checkCudaError(cudaMalloc(&d_recvIndices, recvTotal * sizeof(uint64_t)), "d_recvIndices cavg");
-        checkCudaError(cudaMalloc(&d_recvVx,      recvTotal * sizeof(T)),        "d_recvVx cavg");
-        checkCudaError(cudaMalloc(&d_recvVy,      recvTotal * sizeof(T)),        "d_recvVy cavg");
-        checkCudaError(cudaMalloc(&d_recvVz,      recvTotal * sizeof(T)),        "d_recvVz cavg");
-
-        checkCudaError(cudaMemcpy(d_recvIndices, mesh.recv_index_cavg.data(), recvTotal * sizeof(uint64_t), cudaMemcpyHostToDevice), "cp recv idx cavg");
-        checkCudaError(cudaMemcpy(d_recvVx,      mesh.recv_vx_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vx cavg");
-        checkCudaError(cudaMemcpy(d_recvVy,      mesh.recv_vy_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vy cavg");
-        checkCudaError(cudaMemcpy(d_recvVz,      mesh.recv_vz_cavg.data(),    recvTotal * sizeof(T),        cudaMemcpyHostToDevice), "cp recv vz cavg");
 
         int rb = (recvTotal + threadsPerBlock - 1) / threadsPerBlock;
         accumulateCellAvgKernel<T><<<rb, threadsPerBlock>>>(
@@ -1957,29 +2359,13 @@ void launchExtrapolateEmptyCellsKernel(const T* srcVelX, const T* srcVelY, const
         srcVelX, srcVelY, srcVelZ, velX, velY, velZ, distance, inboxSize_d);
 }
 
-// CUDA kernel to compute power spectrum from FFT output (squared magnitude)
-template<typename T>
-__global__ void computePowerSpectrumKernel(std::complex<T>* fftOutput, T* powerSpectrum, uint64_t size, T meshSize)
-{
-    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= size) return;
-    
-    // Compute magnitude manually (std::complex methods not available in device code)
-    // std::complex<T> is layout-compatible with T[2], so we can access it directly
-    T* complexData = reinterpret_cast<T*>(&fftOutput[idx]);
-    T real = complexData[0];
-    T imag = complexData[1];
-    T magnitude = sqrt(real * real + imag * imag) / meshSize;
-    powerSpectrum[idx] = magnitude * magnitude;
-}
-
 // CUDA kernel to compute freqVelo = velX + velY + velZ
 template<typename T>
 __global__ void computeFreqVeloKernel(T* velX, T* velY, T* velZ, T* freqVelo, uint64_t size)
 {
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
-    
+
     freqVelo[idx] = velX[idx] + velY[idx] + velZ[idx];
 }
 
@@ -1991,34 +2377,27 @@ __global__ void sphericalAveragingKernel(T* freqVelo, T* k_values, T* k_1d, T* p
     int i = blockIdx.z * blockDim.z + threadIdx.z;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (i >= inboxSize[2] || j >= inboxSize[1] || k >= inboxSize[0]) return;
-    
+
     uint64_t freq_index = k + j * inboxSize[0] + i * inboxSize[0] * inboxSize[1];
-    
+
     // Calculate the k indices with respect to the global mesh
     uint64_t k_index_i = i + inboxLow[2];
     uint64_t k_index_j = j + inboxLow[1];
     uint64_t k_index_k = k + inboxLow[0];
-    
+
     T kdist = sqrt(k_values[k_index_i] * k_values[k_index_i] +
                    k_values[k_index_j] * k_values[k_index_j] +
                    k_values[k_index_k] * k_values[k_index_k]);
-    
+
     // Match CPU binning exactly: shell index = round(|k|), clamped to [0, numShells-1].
     uint64_t k_index = static_cast<uint64_t>(round(kdist));
     if (k_index >= static_cast<uint64_t>(numShells)) k_index = static_cast<uint64_t>(numShells - 1);
-    
+
     // Atomic accumulation
     atomicAdd(&ps_rad[k_index], freqVelo[freq_index]);
     atomicAdd(&count[k_index], 1);
-}
-
-// Kernel launcher functions
-template<typename T>
-void launchComputePowerSpectrumKernel(std::complex<T>* fftOutput, T* powerSpectrum, uint64_t size, T meshSize, int blocks, int threads)
-{
-    computePowerSpectrumKernel<T><<<blocks, threads>>>(fftOutput, powerSpectrum, size, meshSize);
 }
 
 template<typename T>
@@ -2036,8 +2415,6 @@ void launchSphericalAveragingKernel(T* freqVelo, T* k_values, T* k_1d, T* ps_rad
                                                           inboxSize, inboxLow, gridDim, numShells);
 }
 
-// Explicit template instantiations
-template void launchComputePowerSpectrumKernel<double>(std::complex<double>*, double*, uint64_t, double, int, int);
 template void launchComputeFreqVeloKernel<double>(double*, double*, double*, double*, uint64_t, int, int);
 template void launchSphericalAveragingKernel<double>(double*, double*, double*, double*, int*,
                                                       int*, int*, int, int, dim3, dim3);
@@ -2050,6 +2427,8 @@ template void launchExtrapolateEmptyCellsKernel<double>(const double*, const dou
 template void rasterize_particles_to_mesh_cuda<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
                                                         std::vector<double>, std::vector<double>, std::vector<double>,
                                                         std::vector<double>, std::vector<double>, int);
+template void rasterize_particles_to_density_cuda<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
+                                                           std::vector<double>, std::vector<double>, int);
 template void rasterize_particles_to_mesh_sph_cuda<double>(Mesh<double>&, std::vector<KeyType>, std::vector<double>,
                                                             std::vector<double>, std::vector<double>, std::vector<double>,
                                                             std::vector<double>, std::vector<double>, std::vector<double>,

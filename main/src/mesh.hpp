@@ -18,9 +18,6 @@ using KeyType = uint64_t;
 #ifdef USE_CUDA
 // Forward declarations for CUDA kernel launchers
 template<typename T>
-void launchComputePowerSpectrumKernel(std::complex<T>* fftOutput, T* powerSpectrum, uint64_t size, T meshSize, int blocks, int threads);
-
-template<typename T>
 void launchComputeFreqVeloKernel(T* velX, T* velY, T* velZ, T* freqVelo, uint64_t size, int blocks, int threads);
 
 template<typename T>
@@ -64,6 +61,13 @@ struct DataSenderCellAvg
     std::vector<double>   send_vz;
 };
 
+struct DataSenderDensity
+{
+    // vectors to send to each rank in all_to_allv for density accumulation
+    std::vector<uint64_t> send_index;
+    std::vector<double>   send_mass;
+};
+
 template<typename T>
 class Mesh
 {
@@ -75,6 +79,8 @@ public:
     T                  Lmin_;
     T                  Lmax_;
     bool               usePencils_ = false; // heFFTe decomposition: false=slabs, true=pencils
+    bool               useCudaAwareMpi_ = false; // use device pointers in MPI_Alltoallv for CUDA rasterizers
+    bool               useCudaAwareGpuPack_ = false; // full GPU rank-pack path (experimental)
     std::array<int, 3> proc_grid_;
 
     heffte::box3d<> inbox_;
@@ -86,6 +92,10 @@ public:
     std::vector<T> velX_;
     std::vector<T> velY_;
     std::vector<T> velZ_;
+    // mass sum and density per voxel on the local heFFTe inbox
+    std::vector<T> massSum_;
+    std::vector<T> density_;
+    T              particleMass_ = T(1);
     // particle's distance to mesh point
     std::vector<T> distance_;
     
@@ -165,6 +175,17 @@ public:
     std::vector<T>                 recv_vy_cavg;
     std::vector<T>                 recv_vz_cavg;
 
+    // Density accumulation data structures
+    std::vector<DataSenderDensity> vdataSenderDensity;
+    std::vector<int>               send_disp_density;
+    std::vector<int>               send_count_density;
+    std::vector<int>               recv_disp_density;
+    std::vector<int>               recv_count_density;
+    std::vector<uint64_t>          send_index_density;
+    std::vector<T>                 send_mass_density;
+    std::vector<uint64_t>          recv_index_density;
+    std::vector<T>                 recv_mass_density;
+
     // sim box -0.5 to 0.5 by default
     Mesh(int rank, int numRanks, int gridDim, int numShells)
         : rank_(rank)
@@ -177,14 +198,16 @@ public:
     {
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
                              static_cast<uint64_t>(inbox_.size[2]);
-        std::cout << "rank = " << rank << " griddim = " << gridDim << " inboxSize = " << inboxSize << std::endl;
-        std::cout << "rank = " << rank << " inbox low = " << inbox_.low[0] << " " << inbox_.low[1] << " "
-                  << inbox_.low[2] << std::endl;
-        std::cout << "rank = " << rank << " inbox high = " << inbox_.high[0] << " " << inbox_.high[1] << " "
-                  << inbox_.high[2] << std::endl;
+        // std::cout << "rank = " << rank << " griddim = " << gridDim << " inboxSize = " << inboxSize << std::endl;
+        // std::cout << "rank = " << rank << " inbox low = " << inbox_.low[0] << " " << inbox_.low[1] << " "
+        //           << inbox_.low[2] << std::endl;
+        // std::cout << "rank = " << rank << " inbox high = " << inbox_.high[0] << " " << inbox_.high[1] << " "
+        //           << inbox_.high[2] << std::endl;
         velX_.resize(inboxSize);
         velY_.resize(inboxSize);
         velZ_.resize(inboxSize);
+        massSum_.resize(inboxSize, T(0));
+        density_.resize(inboxSize, T(0));
         x_.resize(inbox_.size[0]);
         // y_.resize(inbox_.size[1]);
         // z_.resize(inbox_.size[2]);
@@ -214,8 +237,11 @@ public:
                                      const std::vector<T>& z, const std::vector<T>& vx, const std::vector<T>& vy,
                                      const std::vector<T>& vz, int powerDim)
     {
-        std::cout << "rank" << rank_ << " rasterize start " << powerDim << std::endl;
+        // std::cout << "rank" << rank_ << " rasterize start " << powerDim << std::endl;
         // std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
+        std::fill(send_count.begin(), send_count.end(), 0);
+        std::fill(send_disp.begin(), send_disp.end(), 0);
+        std::fill(recv_disp.begin(), recv_disp.end(), 0);
 
         int particleIndex = 0;
         // iterate over keys vector
@@ -255,7 +281,7 @@ public:
         send_vx.resize(send_disp[numRanks_]);
         send_vy.resize(send_disp[numRanks_]);
         send_vz.resize(send_disp[numRanks_]);
-        std::cout << "rank = " << rank_ << " buffers allocated" << std::endl;
+        // std::cout << "rank = " << rank_ << " buffers allocated" << std::endl;
 
         for (int i = 0; i < numRanks_; i++)
         {
@@ -315,13 +341,90 @@ public:
         extrapolateEmptyCellsFromNeighbors();
     }
 
+    void rasterize_particles_to_density(const std::vector<KeyType>& keys, const std::vector<T>& x,
+                                        const std::vector<T>& y, const std::vector<T>& z, int powerDim)
+    {
+        // std::cout << "rank" << rank_ << " rasterize density start " << powerDim << std::endl;
+        (void)x;
+        (void)y;
+        (void)z;
+
+        std::fill(massSum_.begin(), massSum_.end(), T(0));
+        std::fill(density_.begin(), density_.end(), T(0));
+        std::fill(send_count_density.begin(), send_count_density.end(), 0);
+        std::fill(send_disp_density.begin(), send_disp_density.end(), 0);
+        std::fill(recv_disp_density.begin(), recv_disp_density.end(), 0);
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            vdataSenderDensity[i].send_index.clear();
+            vdataSenderDensity[i].send_mass.clear();
+        }
+
+        for (auto it = keys.begin(); it != keys.end(); ++it)
+        {
+            auto crd    = calculateKeyIndices(*it, gridDim_);
+            int  indexi = std::get<0>(crd);
+            int  indexj = std::get<1>(crd);
+            int  indexk = std::get<2>(crd);
+
+            assert(indexi < gridDim_);
+            assert(indexj < gridDim_);
+            assert(indexk < gridDim_);
+
+            assignDensityByMeshCoord(indexi, indexj, indexk, particleMass_);
+        }
+
+        MPI_Alltoall(send_count_density.data(), 1, MpiType<int>{}, recv_count_density.data(), 1, MpiType<int>{},
+                     MPI_COMM_WORLD);
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            send_disp_density[i + 1] = send_disp_density[i] + send_count_density[i];
+            recv_disp_density[i + 1] = recv_disp_density[i] + recv_count_density[i];
+        }
+
+        send_index_density.resize(send_disp_density[numRanks_]);
+        send_mass_density.resize(send_disp_density[numRanks_]);
+        for (int i = 0; i < numRanks_; i++)
+        {
+            for (int j = send_disp_density[i]; j < send_disp_density[i + 1]; j++)
+            {
+                int local = j - send_disp_density[i];
+                send_index_density[j] = vdataSenderDensity[i].send_index[local];
+                send_mass_density[j]  = vdataSenderDensity[i].send_mass[local];
+            }
+        }
+
+        recv_index_density.resize(recv_disp_density[numRanks_]);
+        recv_mass_density.resize(recv_disp_density[numRanks_]);
+        MPI_Alltoallv(send_index_density.data(), send_count_density.data(), send_disp_density.data(),
+                      MpiType<uint64_t>{}, recv_index_density.data(), recv_count_density.data(),
+                      recv_disp_density.data(), MpiType<uint64_t>{}, MPI_COMM_WORLD);
+        MPI_Alltoallv(send_mass_density.data(), send_count_density.data(), send_disp_density.data(), MpiType<T>{},
+                      recv_mass_density.data(), recv_count_density.data(), recv_disp_density.data(), MpiType<T>{},
+                      MPI_COMM_WORLD);
+
+        for (int i = 0; i < recv_disp_density[numRanks_]; i++)
+        {
+            massSum_[recv_index_density[i]] += recv_mass_density[i];
+        }
+        finalizeDensityFromMass();
+
+        for (int i = 0; i < numRanks_; i++)
+        {
+            vdataSenderDensity[i].send_index.clear();
+            vdataSenderDensity[i].send_mass.clear();
+        }
+    }
+
     // SPH interpolation rasterization function
     void rasterize_particles_to_mesh_sph(const std::vector<KeyType>& keys, const std::vector<T>& x,
                                          const std::vector<T>& y, const std::vector<T>& z, const std::vector<T>& vx,
                                          const std::vector<T>& vy, const std::vector<T>& vz, const std::vector<T>& h,
                                          int powerDim)
     {
-        std::cout << "rank" << rank_ << " rasterize start (SPH) " << powerDim << std::endl;
+        // std::cout << "rank" << rank_ << " rasterize start (SPH) " << powerDim << std::endl;
         // std::cout << "rank" << rank_ << " keys between " << *keys.begin() << " - " << keys.back() << std::endl;
 
         // Reset SPH accumulation arrays
@@ -624,9 +727,42 @@ public:
         }
     }
 
+    void assignDensityByMeshCoord(int meshx, int meshy, int meshz, T mass)
+    {
+        int      targetRank  = calculateRankFromMeshCoord(meshx, meshy, meshz);
+        uint64_t targetIndex = calculateInboxIndexFromMeshCoord(meshx, meshy, meshz);
+
+        if (targetRank == rank_)
+        {
+            massSum_[targetIndex] += mass;
+        }
+        else
+        {
+            send_count_density[targetRank]++;
+            vdataSenderDensity[targetRank].send_index.push_back(targetIndex);
+            vdataSenderDensity[targetRank].send_mass.push_back(mass);
+        }
+    }
+
+    void finalizeDensityFromMass()
+    {
+        T boxSize = (Lmax_ - Lmin_);
+        T dx      = boxSize / static_cast<T>(gridDim_);
+        T cellVol = dx * dx * dx;
+        if (cellVol <= T(0)) return;
+
+#pragma omp parallel for
+        for (uint64_t i = 0; i < massSum_.size(); i++)
+        {
+            density_[i] = massSum_[i] / cellVol;
+        }
+    }
+
+    void setParticleMass(T particleMass) { particleMass_ = particleMass; }
+
     void extrapolateEmptyCellsFromNeighbors()
     {
-        std::cout << "rank = " << rank_ << " extrapolate cells" << std::endl;
+        // std::cout << "rank = " << rank_ << " extrapolate cells" << std::endl;
 
         // Read from immutable snapshots so parallel threads don't see each
         // other's writes when sampling neighbors.
@@ -694,13 +830,15 @@ public:
         calculate_fft();
 
 #ifdef USE_CUDA
-        // GPU path: d_velX_/Y_/Z_ hold per-component power spectrum after FFT;
-        // perform spherical averaging entirely on device, copy only the small
-        // power-spectrum result arrays to host at the end.
-        perform_spherical_averaging_gpu();
-        gpuDataValid_ = false;
-        std::cout << "done." << std::endl;
-        return;
+        // GPU path: after FFTW, d_velX_/Y_/Z_ hold per-component power spectrum.
+        // Use GPU spherical averaging when GPU rasterization data is active.
+        if (gpuDataValid_ && d_velX_ && d_velY_ && d_velZ_)
+        {
+            perform_spherical_averaging_gpu();
+            gpuDataValid_ = false;
+            // std::cout << "done." << std::endl;
+            return;
+        }
 #endif
 
         // CPU path
@@ -713,12 +851,12 @@ public:
         }
 
         perform_spherical_averaging(freqVelo.data());
-        std::cout << "done." << std::endl;
+        // std::cout << "done." << std::endl;
     }
 
     void calculate_fft()
     {
-        std::cout << "rank = " << rank_ << " fft calculation started." << std::endl;
+        // std::cout << "rank = " << rank_ << " fft calculation started." << std::endl;
         heffte::box3d<> outbox   = inbox_;
         uint64_t        meshSize = 1;
         meshSize                 = meshSize * gridDim_ * gridDim_ * gridDim_;
@@ -748,232 +886,6 @@ public:
             }
         };
 
-#ifdef USE_CUDA
-        // Use CUDA backend for GPU cases
-        heffte::plan_options options = heffte::default_options<heffte::backend::cufft>();
-        options.use_pencils          = usePencils_;
-        options.use_reorder          = true;
-        options.use_alltoall         = false;
-
-        heffte::fft3d<heffte::backend::cufft> fft(inbox_, outbox, MPI_COMM_WORLD, options);
-
-        std::cout << "rank=" << rank_
-                  << " heFFTe outbox=" << fft.size_outbox()
-                  << " workspace=" << fft.size_workspace()
-                  << " (" << (fft.size_workspace() * sizeof(std::complex<T>) >> 20) << " MB GPU)" << std::endl;
-
-        // Use existing GPU data if available (from CUDA rasterization), otherwise allocate and copy
-        uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
-        uint64_t fftInSize = fft.size_inbox();
-        uint64_t fftOutSize = fft.size_outbox();
-        T* d_velX, *d_velY, *d_velZ;
-
-        cudaError_t err;
-        
-        if (gpuDataValid_ && d_velX_ && d_velY_ && d_velZ_)
-        {
-            // Reuse existing GPU data from rasterization
-            d_velX = d_velX_;
-            d_velY = d_velY_;
-            d_velZ = d_velZ_;
-        }
-        else
-        {
-            // Allocate and copy from host (CPU rasterization case)
-            err = cudaMalloc(&d_velX, inboxSize * sizeof(T));
-            if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMalloc(&d_velY, inboxSize * sizeof(T));
-            if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMalloc(&d_velZ, inboxSize * sizeof(T));
-            if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            
-            err = cudaMemcpy(d_velX, velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velX: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMemcpy(d_velY, velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velY: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMemcpy(d_velZ, velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying d_velZ: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        }
-        
-        auto reportDeviceRealStats = [&](const char* tag, T* d_data, uint64_t n) {
-            if (!diagnosticsEnabled) return;
-            std::vector<T> host(n);
-            cudaError_t copyErr = cudaMemcpy(host.data(), d_data, n * sizeof(T), cudaMemcpyDeviceToHost);
-            if (copyErr != cudaSuccess)
-            {
-                std::cerr << "CUDA Error copying diagnostics buffer (" << tag << "): "
-                          << cudaGetErrorString(copyErr) << std::endl;
-                std::exit(EXIT_FAILURE);
-            }
-            reportHostRealStats(tag, host.data(), n);
-        };
-
-        auto reportDeviceComplexEnergy = [&](const char* tag, std::complex<T>* d_data, uint64_t n) {
-            if (!diagnosticsEnabled) return;
-            std::vector<std::complex<T>> host(n);
-            cudaError_t copyErr = cudaMemcpy(host.data(), d_data, n * sizeof(std::complex<T>), cudaMemcpyDeviceToHost);
-            if (copyErr != cudaSuccess)
-            {
-                std::cerr << "CUDA Error copying complex diagnostics buffer (" << tag << "): "
-                          << cudaGetErrorString(copyErr) << std::endl;
-                std::exit(EXIT_FAILURE);
-            }
-            T localEnergy = 0;
-            T localMaxAbs = 0;
-            for (const auto& c : host)
-            {
-                T e = c.real() * c.real() + c.imag() * c.imag();
-                localEnergy += e;
-                localMaxAbs = std::max(localMaxAbs, std::sqrt(e));
-            }
-            T globalEnergy = 0;
-            T globalMaxAbs = 0;
-            MPI_Allreduce(&localEnergy, &globalEnergy, 1, MpiType<T>{}, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(&localMaxAbs, &globalMaxAbs, 1, MpiType<T>{}, MPI_MAX, MPI_COMM_WORLD);
-            if (rank_ == 0)
-            {
-                std::cout << "[diag] " << tag
-                          << " global_sum_abs2=" << globalEnergy
-                          << " global_max_abs=" << globalMaxAbs << std::endl;
-            }
-        };
-
-        reportDeviceRealStats("gpu_pre_fft_velX", d_velX, inboxSize);
-        reportDeviceRealStats("gpu_pre_fft_velY", d_velY, inboxSize);
-        reportDeviceRealStats("gpu_pre_fft_velZ", d_velZ, inboxSize);
-
-        // Multi-rank cuFFT path can silently produce zero spectra on stacks without
-        // reliable GPU-aware MPI transport. Use distributed FFTW for correctness,
-        // then copy per-component power back to device for GPU spherical averaging.
-        if (numRanks_ > 1)
-        {
-            err = cudaMemcpy(velX_.data(), d_velX, inboxSize * sizeof(T), cudaMemcpyDeviceToHost);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velX to host for FFTW fallback: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMemcpy(velY_.data(), d_velY, inboxSize * sizeof(T), cudaMemcpyDeviceToHost);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velY to host for FFTW fallback: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMemcpy(velZ_.data(), d_velZ, inboxSize * sizeof(T), cudaMemcpyDeviceToHost);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velZ to host for FFTW fallback: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-
-            heffte::plan_options optionsCpu = heffte::default_options<heffte::backend::fftw>();
-            optionsCpu.use_pencils          = usePencils_;
-            heffte::fft3d<heffte::backend::fftw> fftCpu(inbox_, outbox, MPI_COMM_WORLD, optionsCpu);
-            std::vector<std::complex<T>> outputCpu(fftCpu.size_outbox());
-
-            fftCpu.forward(velX_.data(), outputCpu.data(), heffte::scale::none);
-#pragma omp parallel for
-            for (uint64_t i = 0; i < velX_.size(); i++)
-            {
-                T out    = abs(outputCpu.at(i)) / meshSize;
-                velX_[i] = out * out;
-            }
-
-            fftCpu.forward(velY_.data(), outputCpu.data(), heffte::scale::none);
-#pragma omp parallel for
-            for (uint64_t i = 0; i < velY_.size(); i++)
-            {
-                T out    = abs(outputCpu.at(i)) / meshSize;
-                velY_[i] = out * out;
-            }
-
-            fftCpu.forward(velZ_.data(), outputCpu.data(), heffte::scale::none);
-#pragma omp parallel for
-            for (uint64_t i = 0; i < velZ_.size(); i++)
-            {
-                T out    = abs(outputCpu.at(i)) / meshSize;
-                velZ_[i] = out * out;
-            }
-
-            err = cudaMemcpy(d_velX, velX_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velX to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMemcpy(d_velY, velY_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velY to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            err = cudaMemcpy(d_velZ, velZ_.data(), inboxSize * sizeof(T), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velZ to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-
-            reportDeviceRealStats("gpu_post_fft_power_velX", d_velX, inboxSize);
-            reportDeviceRealStats("gpu_post_fft_power_velY", d_velY, inboxSize);
-            reportDeviceRealStats("gpu_post_fft_power_velZ", d_velZ, inboxSize);
-
-            if (!gpuDataValid_ || !d_velX_ || !d_velY_ || !d_velZ_)
-            {
-                if (d_velX_) cudaFree(d_velX_);
-                if (d_velY_) cudaFree(d_velY_);
-                if (d_velZ_) cudaFree(d_velZ_);
-                d_velX_ = d_velX;
-                d_velY_ = d_velY;
-                d_velZ_ = d_velZ;
-            }
-            gpuDataValid_ = true;
-            return;
-        }
-
-        if (fftOutSize != inboxSize)
-        {
-            std::cerr << "Unexpected FFT outbox size mismatch: fftOutSize=" << fftOutSize
-                      << " inboxSize=" << inboxSize << std::endl;
-            std::exit(EXIT_FAILURE);
-        }
-
-        std::complex<T>* d_input_cplx = nullptr;
-        std::complex<T>* d_output_cplx = nullptr;
-        std::complex<T>* d_workspace_cplx = nullptr;
-        err = cudaMalloc(&d_input_cplx, fftInSize * sizeof(std::complex<T>));
-        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_input_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        err = cudaMalloc(&d_output_cplx, fftOutSize * sizeof(std::complex<T>));
-        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_output_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        uint64_t workspaceSize = fft.size_workspace();
-        err = cudaMalloc(&d_workspace_cplx, workspaceSize * sizeof(std::complex<T>));
-        if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_workspace_cplx: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-
-        int threadsPerBlock = 256;
-        int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
-        T   meshSizeT     = static_cast<T>(meshSize);
-
-        // Helper lambda: explicit pointer API with external workspace.
-        auto fftComponent = [&](T* d_vel, const char* name) {
-            cudaMemset(d_input_cplx, 0, fftInSize * sizeof(std::complex<T>));
-            err = cudaMemcpy2D(d_input_cplx,            sizeof(std::complex<T>),
-                               d_vel,                   sizeof(T),
-                               sizeof(T),               fftInSize,
-                               cudaMemcpyDeviceToDevice);
-            if (err != cudaSuccess) { std::cerr << "CUDA Error packing FFT real input: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-
-            fft.forward(d_input_cplx, d_output_cplx, d_workspace_cplx, heffte::scale::none);
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing FFT: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            reportDeviceComplexEnergy("gpu_fft_output_abs2", d_output_cplx, fftOutSize);
-            reportDeviceComplexEnergy("gpu_fft_input_abs2", d_input_cplx, fftInSize);
-            reportDeviceComplexEnergy("gpu_fft_workspace_abs2", d_workspace_cplx, workspaceSize);
-
-            launchComputePowerSpectrumKernel(d_output_cplx, d_vel, fftOutSize, meshSizeT, blocksPerGrid, threadsPerBlock);
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing power spectrum kernel: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-            reportDeviceRealStats(name, d_vel, inboxSize);
-        };
-
-        fftComponent(d_velX, "gpu_post_fft_power_velX");
-        fftComponent(d_velY, "gpu_post_fft_power_velY");
-        fftComponent(d_velZ, "gpu_post_fft_power_velZ");
-
-        cudaFree(d_input_cplx);
-        cudaFree(d_output_cplx);
-        cudaFree(d_workspace_cplx);
-
-        // Keep per-component power spectrum on device for GPU spherical averaging.
-        // If d_velX/Y/Z were locally allocated (CPU rasterization path), transfer
-        // ownership to the persistent mesh device pointers.
-        if (!gpuDataValid_ || !d_velX_ || !d_velY_ || !d_velZ_)
-        {
-            if (d_velX_) cudaFree(d_velX_);
-            if (d_velY_) cudaFree(d_velY_);
-            if (d_velZ_) cudaFree(d_velZ_);
-            d_velX_ = d_velX;
-            d_velY_ = d_velY;
-            d_velZ_ = d_velZ;
-        }
-        // d_velX_/Y_/Z_ now hold per-component |FFT|²/N² values; keep for spherical averaging.
-        gpuDataValid_ = true;
-#else
         // Use FFTW backend for CPU cases
         heffte::plan_options options = heffte::default_options<heffte::backend::fftw>();
         options.use_pencils          = usePencils_;
@@ -986,6 +898,19 @@ public:
                   << " (" << (fft.size_workspace() * sizeof(std::complex<T>) >> 20) << " MB host)" << std::endl;
 
         std::vector<std::complex<T>> output(fft.size_outbox());
+
+    #ifdef USE_CUDA
+        // If GPU rasterization is active, copy velocity fields to host and run FFTW on CPU.
+        if (gpuDataValid_ && d_velX_ && d_velY_ && d_velZ_)
+        {
+            cudaError_t err = cudaMemcpy(velX_.data(), d_velX_, velX_.size() * sizeof(T), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velX to host for FFTW: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(velY_.data(), d_velY_, velY_.size() * sizeof(T), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velY to host for FFTW: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(velZ_.data(), d_velZ_, velZ_.size() * sizeof(T), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying velZ to host for FFTW: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        }
+    #endif
 
         reportHostRealStats("cpu_pre_fft_velX", velX_.data(), velX_.size());
         reportHostRealStats("cpu_pre_fft_velY", velY_.data(), velY_.size());
@@ -1021,6 +946,18 @@ public:
             velZ_[i] = out * out;
         }
         reportHostRealStats("cpu_post_fft_power_velZ", velZ_.data(), velZ_.size());
+
+#ifdef USE_CUDA
+        // Keep power fields on device for GPU spherical averaging when GPU path is active.
+        if (gpuDataValid_ && d_velX_ && d_velY_ && d_velZ_)
+        {
+            cudaError_t err = cudaMemcpy(d_velX_, velX_.data(), velX_.size() * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velX to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(d_velY_, velY_.data(), velY_.size() * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velY to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+            err = cudaMemcpy(d_velZ_, velZ_.data(), velZ_.size() * sizeof(T), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) { std::cerr << "CUDA Error copying FFT power velZ to device: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
+        }
 #endif
     }
 
@@ -1040,13 +977,14 @@ public:
         }
         else
         {
-            for (int i = 0; i < (n - 1) / 2; i++)
+            int cutoff = (n - 1) / 2;
+            for (int i = 0; i <= cutoff; i++)
             {
                 freq[i] = i / (n * dt);
             }
-            for (int i = (n - 1) / 2; i < n; i++)
+            for (int i = cutoff + 1; i < n; i++)
             {
-                freq[i] = (i - n + 1) / (n * dt);
+                freq[i] = (i - n) / (n * dt);
             }
         }
     }
@@ -1056,9 +994,9 @@ public:
     void perform_spherical_averaging_gpu()
     {
         std::cout << "rank = " << rank_ << " spherical averaging started (GPU)." << std::endl;
-        
+
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * inbox_.size[1] * inbox_.size[2];
-        
+
         // Allocate device memory for freqVelo if not already allocated
         if (!d_freqVelo_)
         {
@@ -1069,12 +1007,12 @@ public:
                 std::exit(EXIT_FAILURE);
             }
         }
-        
+
         // Compute freqVelo = velX + velY + velZ on GPU
         int threadsPerBlock = 256;
-        int blocksPerGrid = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
+        int blocksPerGrid   = (inboxSize + threadsPerBlock - 1) / threadsPerBlock;
         launchComputeFreqVeloKernel(d_velX_, d_velY_, d_velZ_, d_freqVelo_, inboxSize, blocksPerGrid, threadsPerBlock);
-        
+
         // Prepare k_values and k_1d on host (small arrays)
         std::vector<T> k_values(gridDim_);
         std::vector<T> k_1d(gridDim_);
@@ -1083,11 +1021,15 @@ public:
         {
             k_1d[i] = std::abs(k_values[i]);
         }
-        
+
         // Allocate device memory for k arrays and accumulation arrays
-        T* d_k_values, *d_k_1d, *d_ps_rad;
-        int* d_count, *d_inboxSize, *d_inboxLow;
-        
+        T* d_k_values = nullptr;
+        T* d_k_1d     = nullptr;
+        T* d_ps_rad   = nullptr;
+        int* d_count = nullptr;
+        int* d_inboxSize = nullptr;
+        int* d_inboxLow  = nullptr;
+
         cudaError_t err;
         err = cudaMalloc(&d_k_values, gridDim_ * sizeof(T));
         if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_k_values: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
@@ -1101,26 +1043,26 @@ public:
         if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_inboxSize: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         err = cudaMalloc(&d_inboxLow, 3 * sizeof(int));
         if (err != cudaSuccess) { std::cerr << "CUDA Error allocating d_inboxLow: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         // Copy data to device
         err = cudaMemcpy(d_k_values, k_values.data(), gridDim_ * sizeof(T), cudaMemcpyHostToDevice);
         if (err != cudaSuccess) { std::cerr << "CUDA Error copying k_values: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         err = cudaMemcpy(d_k_1d, k_1d.data(), gridDim_ * sizeof(T), cudaMemcpyHostToDevice);
         if (err != cudaSuccess) { std::cerr << "CUDA Error copying k_1d: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         std::array<int, 3> inboxSizeArr = {inbox_.size[0], inbox_.size[1], inbox_.size[2]};
-        std::array<int, 3> inboxLowArr = {inbox_.low[0], inbox_.low[1], inbox_.low[2]};
+        std::array<int, 3> inboxLowArr  = {inbox_.low[0], inbox_.low[1], inbox_.low[2]};
         err = cudaMemcpy(d_inboxSize, inboxSizeArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice);
         if (err != cudaSuccess) { std::cerr << "CUDA Error copying inboxSize: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         err = cudaMemcpy(d_inboxLow, inboxLowArr.data(), 3 * sizeof(int), cudaMemcpyHostToDevice);
         if (err != cudaSuccess) { std::cerr << "CUDA Error copying inboxLow: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         // Initialize accumulation arrays
         err = cudaMemset(d_ps_rad, 0, numShells_ * sizeof(T));
         if (err != cudaSuccess) { std::cerr << "CUDA Error memset d_ps_rad: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         err = cudaMemset(d_count, 0, numShells_ * sizeof(int));
         if (err != cudaSuccess) { std::cerr << "CUDA Error memset d_count: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         // Launch spherical averaging kernel
         dim3 blockSize(8, 8, 8);
         dim3 gridSize((inbox_.size[0] + blockSize.x - 1) / blockSize.x,
@@ -1133,34 +1075,71 @@ public:
         if (err != cudaSuccess) { std::cerr << "CUDA Error synchronizing spherical averaging: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
 
         // Copy results back to host
-        std::vector<T> ps_rad(numShells_);
+        std::vector<T>   ps_rad(numShells_);
         std::vector<int> count(numShells_);
         err = cudaMemcpy(ps_rad.data(), d_ps_rad, numShells_ * sizeof(T), cudaMemcpyDeviceToHost);
         if (err != cudaSuccess) { std::cerr << "CUDA Error copying ps_rad: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
         err = cudaMemcpy(count.data(), d_count, numShells_ * sizeof(int), cudaMemcpyDeviceToHost);
         if (err != cudaSuccess) { std::cerr << "CUDA Error copying count: " << cudaGetErrorString(err) << std::endl; std::exit(EXIT_FAILURE); }
-        
+
         // MPI reduction and normalization (same as CPU version)
         std::vector<int> counts(numShells_, 0);
         MPI_Reduce(ps_rad.data(), power_spectrum_.data(), numShells_, MpiType<T>{}, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(count.data(), counts.data(), numShells_, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-        
+
         // Normalize the power spectrum
         if (rank_ == 0)
         {
             T sum_ps_radial = std::accumulate(power_spectrum_.begin(), power_spectrum_.end(), 0.0);
             std::cout << "sum_ps_radial: " << sum_ps_radial << std::endl;
-            
-#pragma omp parallel for
-            for (int i = 0; i < numShells_; i++)
+
+            int minBinCount = 64;
+            if (const char* env = std::getenv("PS_MIN_BIN_COUNT")) minBinCount = std::max(1, std::atoi(env));
+
+            std::vector<T> normalized(numShells_, T(0));
+            for (int i = 0; i < numShells_;)
             {
-                if (counts[i] != 0)
-                    power_spectrum_[i] =
-                        (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i], 2)) / counts[i];
+                int j = i;
+                T   psSum = power_spectrum_[i];
+                int cSum  = counts[i];
+
+                while (j + 1 < numShells_ && cSum > 0 && cSum < minBinCount)
+                {
+                    ++j;
+                    psSum += power_spectrum_[j];
+                    cSum += counts[j];
+                }
+
+                if (cSum > 0)
+                {
+                    T   k2Weighted = 0;
+                    int cForK      = 0;
+                    for (int b = i; b <= j; b++)
+                    {
+                        if (counts[b] == 0) continue;
+                        int kb = std::min(b, gridDim_ - 1);
+                        k2Weighted += std::pow(k_1d[kb], 2) * counts[b];
+                        cForK += counts[b];
+                    }
+                    if (cForK == 0)
+                    {
+                        int kb = std::min(i, gridDim_ - 1);
+                        k2Weighted = std::pow(k_1d[kb], 2);
+                        cForK = 1;
+                    }
+
+                    T k2Mean = k2Weighted / static_cast<T>(cForK);
+                    T val    = (psSum / static_cast<T>(cSum)) * 4.0 * std::numbers::pi * k2Mean;
+                    for (int b = i; b <= j; b++) normalized[b] = val;
+                }
+
+                i = j + 1;
             }
+
+            power_spectrum_.swap(normalized);
         }
-        
-        // Free device memory
+
+        // Free temporary device memory
         cudaFree(d_k_values);
         cudaFree(d_k_1d);
         cudaFree(d_ps_rad);
@@ -1226,13 +1205,50 @@ public:
 
             std::cout << "sum_ps_radial: " << sum_ps_radial << std::endl;
 
-#pragma omp parallel for
-            for (int i = 0; i < numShells_; i++)
+            int minBinCount = 64;
+            if (const char* env = std::getenv("PS_MIN_BIN_COUNT")) minBinCount = std::max(1, std::atoi(env));
+
+            std::vector<T> normalized(numShells_, T(0));
+            for (int i = 0; i < numShells_;)
             {
-                if (counts[i] != 0)
-                    power_spectrum_[i] =
-                        (power_spectrum_[i] * 4.0 * std::numbers::pi * std::pow(k_1d[i], 2)) / counts[i];
+                int j = i;
+                T   psSum = power_spectrum_[i];
+                int cSum  = counts[i];
+
+                while (j + 1 < numShells_ && cSum > 0 && cSum < minBinCount)
+                {
+                    ++j;
+                    psSum += power_spectrum_[j];
+                    cSum += counts[j];
+                }
+
+                if (cSum > 0)
+                {
+                    T   k2Weighted = 0;
+                    int cForK      = 0;
+                    for (int b = i; b <= j; b++)
+                    {
+                        if (counts[b] == 0) continue;
+                        int kb = std::min(b, gridDim_ - 1);
+                        k2Weighted += std::pow(k_1d[kb], 2) * counts[b];
+                        cForK += counts[b];
+                    }
+                    if (cForK == 0)
+                    {
+                        int kb = std::min(i, gridDim_ - 1);
+                        k2Weighted = std::pow(k_1d[kb], 2);
+                        cForK = 1;
+                    }
+
+                    T k2Mean = k2Weighted / static_cast<T>(cForK);
+                    T val    = (psSum / static_cast<T>(cSum)) * 4.0 * std::numbers::pi * k2Mean;
+                    for (int b = i; b <= j; b++) normalized[b] = val;
+                }
+
+                i = j + 1;
             }
+
+            power_spectrum_.swap(normalized);
         }
     }
 
@@ -1241,7 +1257,7 @@ public:
                                                const std::vector<T>& vx, const std::vector<T>& vy,
                                                const std::vector<T>& vz, int powerDim)
     {
-        std::cout << "rank" << rank_ << " rasterize start (cell_avg) " << powerDim << std::endl;
+        // std::cout << "rank" << rank_ << " rasterize start (cell_avg) " << powerDim << std::endl;
         // std::cout << "rank" << rank_ << " keys between " << keys.front() << " - " << keys.back() << std::endl;
 
         uint64_t inboxSize = static_cast<uint64_t>(inbox_.size[0]) * static_cast<uint64_t>(inbox_.size[1]) *
@@ -1378,6 +1394,11 @@ public:
         vdataSender.resize(size);
         vdataSenderSPH.resize(size);
         vdataSenderCellAvg.resize(size);
+        vdataSenderDensity.resize(size);
+        send_disp_density.resize(size + 1, 0);
+        send_count_density.resize(size, 0);
+        recv_disp_density.resize(size + 1, 0);
+        recv_count_density.resize(size, 0);
     }
 
     T calculateDistance(T x, T y, T z, int i, int j, int k)
@@ -1522,8 +1543,8 @@ private:
 
         proc_grid_ = heffte::proc_setup_min_surface(all_indexes, numRanks_);
         // print proc_grid
-        std::cout << "rank = " << rank_ << " proc_grid: " << proc_grid_[0] << " " << proc_grid_[1] << " "
-                  << proc_grid_[2] << std::endl;
+        // std::cout << "rank = " << rank_ << " proc_grid: " << proc_grid_[0] << " " << proc_grid_[1] << " "
+        //           << proc_grid_[2] << std::endl;
 
         // split all indexes across the processor grid, defines a set of boxes
         std::vector<heffte::box3d<>> all_boxes = heffte::split_world(all_indexes, proc_grid_);
@@ -1553,6 +1574,9 @@ template<typename T>
 void rasterize_particles_to_mesh_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
                                       std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
                                       int powerDim);
+template<typename T>
+void rasterize_particles_to_density_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x,
+                                         std::vector<T> y, std::vector<T> z, int powerDim);
 template<typename T>
 void rasterize_particles_to_mesh_sph_cuda(Mesh<T>& mesh, std::vector<KeyType> keys, std::vector<T> x, std::vector<T> y,
                                           std::vector<T> z, std::vector<T> vx, std::vector<T> vy, std::vector<T> vz,
