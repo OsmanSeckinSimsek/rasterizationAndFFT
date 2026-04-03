@@ -1,0 +1,21 @@
+<map id="source_center_gpu.h" name="source_center_gpu.h">
+<area shape="rect" id="Node000001" title="Compute cell mass centers for use in focus tree." alt="" coords="174,5,330,31"/>
+<area shape="rect" id="Node000002" href="$definitions_8h.html" title=" " alt="" coords="163,79,341,104"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="255,31,255,65,249,65,249,31"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="5,152,72,177"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="219,107,86,151,84,145,217,101"/>
+<area shape="rect" id="Node000004" href="$annotation_8hpp.html" title="Defines macros for enabling device code compilation." alt="" coords="205,225,408,251"/>
+<area shape="poly" id="edge3_Node000002_Node000004" title=" " alt="" coords="264,103,279,124,293,151,302,182,307,212,302,212,297,183,288,153,274,127,259,106"/>
+<area shape="rect" id="Node000005" href="$stl_8hpp.html" title="Functionality that exist in std::, but cannot be used in device code." alt="" coords="97,152,279,177"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="243,106,209,144,205,140,239,103"/>
+<area shape="rect" id="Node000007" href="$array_8hpp.html" title="implementation of a compile&#45;time size array that can be used on the host and device" alt="" coords="376,152,531,177"/>
+<area shape="poly" id="edge7_Node000002_Node000007" title=" " alt="" coords="285,102,409,145,407,150,283,107"/>
+<area shape="poly" id="edge6_Node000005_Node000004" title=" " alt="" coords="208,175,277,216,274,220,206,180"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="89,225,181,251"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="181,179,154,216,149,213,177,176"/>
+<area shape="poly" id="edge10_Node000007_Node000004" title=" " alt="" coords="431,180,344,222,342,217,429,175"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="433,225,495,251"/>
+<area shape="poly" id="edge8_Node000007_Node000008" title=" " alt="" coords="458,177,463,211,458,212,452,178"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="519,225,579,251"/>
+<area shape="poly" id="edge9_Node000007_Node000009" title=" " alt="" coords="470,175,524,215,521,219,467,180"/>
+</map>

@@ -1,0 +1,4 @@
+var structcstone_1_1AccelSwitchType_3_01Accelerator_00_01CpuCaseType_00_01GpuCaseType_00_01std_1_1enad0343bc173fc55b8f912aec63bc1209 =
+[
+    [ "type", "structcstone_1_1AccelSwitchType_3_01Accelerator_00_01CpuCaseType_00_01GpuCaseType_00_01std_1_1enad0343bc173fc55b8f912aec63bc1209.html#a50e5e474d2127534863b07c434582886", null ]
+];
