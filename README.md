@@ -1,5 +1,12 @@
 # rasterizationAndFFT
 
+# AI compute marketplace
+
+The repository also includes an initial marketplace module in
+`marketplace/`. It provides an in-memory C++20 order book that matches
+GPU-hour supply offers from resource owners with GPU-hour demand bids from
+compute users by resource type, price, and FIFO priority.
+
 # Python scripts in this Repository
 
 1. **`raster.py`**: Reads a specific step from an h5 snapshot of SPH-EXA, creates a 3D Cartesian mesh, and performs a nearest neighbor search for each cell, to find the closest SPH particle and assign its velocity. Generates a file with the Cartesian grid and corresponding velocity components: x, y, z, vx, vy, vz
