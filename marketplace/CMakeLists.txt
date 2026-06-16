@@ -1,3 +1,9 @@
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    cmake_minimum_required(VERSION 3.22)
+    project(marketplace CXX)
+    include(CTest)
+endif()
+
 add_library(marketplace INTERFACE)
 target_include_directories(marketplace INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(marketplace INTERFACE cxx_std_20)
